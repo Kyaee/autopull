@@ -81,7 +81,12 @@ export const discoverRepositories = async (roots, options = {}) => {
         }
 
         for (const entry of entries) {
-            if (!entry.isDirectory() || entry.isSymbolicLink() || ignoredNames.has(entry.name)) continue;
+            if (
+                !entry.isDirectory()
+                || entry.isSymbolicLink()
+                || entry.name.startsWith(".")
+                || ignoredNames.has(entry.name)
+            ) continue;
             queue.push({ path: resolve(canonicalPath, entry.name), depth: current.depth + 1 });
         }
     }
@@ -91,4 +96,3 @@ export const discoverRepositories = async (roots, options = {}) => {
         errors,
     };
 };
-

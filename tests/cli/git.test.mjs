@@ -87,6 +87,29 @@ test("classifies a repository with untracked work as dirty and blocks pulling", 
     assert.match(result.message, /local changes are present/);
 });
 
+test("detects a real unresolved merge conflict and blocks pulling", async () => {
+    const root = await temporaryDirectory();
+    await initializeRepository(root);
+    await git(root, "switch", "-c", "incoming");
+    await writeFile(join(root, "README.md"), "incoming version\n");
+    await git(root, "add", "README.md");
+    await git(root, "commit", "-m", "incoming change");
+    await git(root, "switch", "main");
+    await writeFile(join(root, "README.md"), "personal version\n");
+    await git(root, "add", "README.md");
+    await git(root, "commit", "-m", "personal change");
+    await assert.rejects(git(root, "merge", "incoming"));
+
+    const status = await inspectRepository(root);
+    assert.equal(status.state, "conflict");
+    assert.equal(status.conflicts, 1);
+    assert.equal(status.canPull, false);
+
+    const result = await pullRepository(root);
+    assert.equal(result.blocked, true);
+    assert.match(result.message, /unresolved conflict/);
+});
+
 test("fast-forwards a clean repository from its upstream", async () => {
     const root = await temporaryDirectory();
     const bare = join(root, "remote.git");
@@ -118,6 +141,43 @@ test("fast-forwards a clean repository from its upstream", async () => {
     assert.equal(result.ok, true);
     assert.equal(result.repository.behind, 0);
     assert.equal(result.repository.state, "current");
+});
+
+test("blocks a pull when local and remote history diverge", async () => {
+    const root = await temporaryDirectory();
+    const bare = join(root, "remote.git");
+    const seed = join(root, "seed");
+    const consumer = join(root, "consumer");
+
+    await execFileAsync("git", ["init", "--bare", "--initial-branch=main", bare]);
+    await execFileAsync("git", ["clone", bare, seed]);
+    await git(seed, "config", "user.email", "autopull@example.test");
+    await git(seed, "config", "user.name", "Autopull Tests");
+    await writeFile(join(seed, "README.md"), "initial\n");
+    await git(seed, "add", "README.md");
+    await git(seed, "commit", "-m", "initial");
+    await git(seed, "push", "-u", "origin", "main");
+    await execFileAsync("git", ["clone", bare, consumer]);
+    await git(consumer, "config", "user.email", "autopull@example.test");
+    await git(consumer, "config", "user.name", "Autopull Tests");
+
+    await writeFile(join(consumer, "local.txt"), "local\n");
+    await git(consumer, "add", "local.txt");
+    await git(consumer, "commit", "-m", "local change");
+    await writeFile(join(seed, "remote.txt"), "remote\n");
+    await git(seed, "add", "remote.txt");
+    await git(seed, "commit", "-m", "remote change");
+    await git(seed, "push");
+    await fetchRepository(consumer);
+
+    const status = await inspectRepository(consumer);
+    assert.equal(status.state, "diverged");
+    assert.equal(status.ahead, 1);
+    assert.equal(status.behind, 1);
+
+    const result = await pullRepository(consumer);
+    assert.equal(result.blocked, true);
+    assert.match(result.message, /histories have diverged/);
 });
 
 test("CLI scan accepts a package-runner delimiter and emits protocol JSON", async () => {

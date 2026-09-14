@@ -39,6 +39,8 @@ const parsedArguments = (argv) => {
             index += 1;
         } else if (argument.startsWith("--max-depth=")) {
             maxDepth = Number(argument.split("=", 2)[1]);
+        } else if (argument.startsWith("-")) {
+            throw new Error(`Unknown option: ${argument}`);
         } else {
             values.push(argument);
         }
