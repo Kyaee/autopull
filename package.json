@@ -13,13 +13,13 @@
         "#data/*": "./data/*"
     },
     "scripts": {
-        "dev": "gtkx dev",
-        "build": "gtkx build",
-        "codegen": "gtkx codegen",
-        "typecheck": "gtkx codegen && tsc",
+        "dev": "node scripts/with-gtkx-env.mjs gtkx dev",
+        "build": "node scripts/with-gtkx-env.mjs gtkx build",
+        "codegen": "node scripts/with-gtkx-env.mjs gtkx codegen",
+        "typecheck": "pnpm codegen && tsc",
         "start": "node dist/bundle.mjs",
-        "deploy": "gtkx deploy",
-        "test": "vitest run",
+        "deploy": "node scripts/with-gtkx-env.mjs gtkx deploy",
+        "test": "node scripts/with-gtkx-env.mjs vitest run",
         "test:cli": "node --test tests/cli/*.test.mjs",
         "autopull": "node cli/autopull.mjs"
     },

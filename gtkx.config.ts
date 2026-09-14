@@ -5,10 +5,10 @@ export default defineConfig({
     applicationId: "com.autopull.app",
     deploy: {
         name: "Autopull",
-        summary: "A GTK4 application built with GTKX",
+        summary: "Safely inspect and update local Git repositories",
         description: [
-            "Autopull is a GTK4 and Adwaita application built with GTKX, which renders native GObject "
-            + "widgets from React. Replace this paragraph with a description of what your application does.",
+            "Autopull shows the working-tree and upstream state of local Git repositories before "
+            + "running explicit, fast-forward-only updates.",
         ],
         categories: ["Utility"],
     },

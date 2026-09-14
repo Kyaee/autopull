@@ -1,0 +1,9 @@
+prefix=/usr
+datadir=${prefix}/share
+
+girdir=${datadir}/gir-1.0
+
+Name: gobject-introspection
+Description: Compatibility alias for Fedora's girepository-2.0 package
+Version: 2.0
+Requires: girepository-2.0
