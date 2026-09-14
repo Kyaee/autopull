@@ -1,4 +1,4 @@
-import { fetchRepository, inspectRepository } from "./git.mjs";
+import { fetchRepository, inspectRepository, pullRepository } from "./git.mjs";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -59,6 +59,31 @@ export const refreshMany = async (paths, options = {}) => {
 
     await Promise.all(Array.from({ length: Math.min(concurrency, paths.length) }, worker));
     return results;
+};
+
+export const pullMany = async (repositories, options = {}) => {
+    const pull = options.pullRepository ?? pullRepository;
+    const candidates = repositories.filter((repository) => repository.needsPull);
+    const results = [];
+    for (const repository of candidates) {
+        try {
+            results.push(await pull(repository.path));
+        } catch (error) {
+            results.push({
+                ok: false,
+                blocked: false,
+                message: error instanceof Error ? error.message : String(error),
+                repository,
+            });
+        }
+    }
+    return {
+        results,
+        waiting: candidates.length,
+        updated: results.filter((result) => result.ok).length,
+        blocked: results.filter((result) => result.blocked).length,
+        failed: results.filter((result) => !result.ok && !result.blocked).length,
+    };
 };
 
 export const summarize = (repositories) => repositories.reduce((summary, repository) => {

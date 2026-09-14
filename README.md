@@ -32,7 +32,11 @@ pnpm install
 pnpm autopull
 ```
 
-Use `j`/`k` or the arrow keys to select a repository. Press `s` to scan local state, `r` to fetch and refresh remote state, `p` to fast-forward the selected repository when it is safe, and `q` to exit. Pass roots after the explicit `tui` command when you do not want the configured defaults:
+Use `j`/`k` or the arrow keys to select a repository. Press `s` to scan local state, `r` to fetch and refresh remote state, `p` to fast-forward the selected repository when it is safe, and `q` to exit.
+
+Press `g` to manage repository groups. The group screen can create, rename, delete, and edit group membership. Select a group to filter the dashboard, then press `a` to pull every repository in that group with a waiting update. Autopull asks for confirmation and checks each repository again before running `git pull --ff-only`. Group definitions are stored in `~/.config/autopull/groups.json`. Set `AUTOPULL_GROUPS_FILE` to use another file.
+
+Pass roots after the explicit `tui` command when you do not want the configured defaults:
 
 ```sh
 pnpm autopull -- tui ~/Repos ~/work --max-depth 4

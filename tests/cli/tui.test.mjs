@@ -26,10 +26,18 @@ const repository = (overrides = {}) => ({
 
 const model = (repositories) => ({
     roots: ["/work"],
+    allRepositories: repositories,
     repositories,
     summary: null,
     discoveryErrors: [],
     selectedIndex: 0,
+    groups: [],
+    activeGroup: null,
+    groupIndex: 0,
+    editingGroup: null,
+    memberIndex: 0,
+    view: "repositories",
+    modal: null,
     busy: false,
     activity: "",
     notification: "",
@@ -42,7 +50,7 @@ test("renders repository state, selected details, and TUI controls", () => {
     assert.match(output, /› example/);
     assert.match(output, /Branch  main  →  origin\/main/);
     assert.match(output, /Ready to fast-forward\. Press p to pull/);
-    assert.match(output, /r refresh remotes/);
+    assert.match(output, /r refresh/);
 });
 
 test("explains why a selected repository cannot be pulled", () => {
@@ -66,7 +74,28 @@ test("maps navigation and action keys", () => {
     assert.equal(tuiActionForKey({ name: "up" }), "up");
     assert.equal(tuiActionForKey({ name: "j" }), "down");
     assert.equal(tuiActionForKey({ name: "r" }), "refresh");
-    assert.equal(tuiActionForKey({ name: "return" }), "pull");
+    assert.equal(tuiActionForKey({ name: "return" }), "enter");
+    assert.equal(tuiActionForKey({ name: "g" }), "groups");
+    assert.equal(tuiActionForKey({ name: "space" }), "toggle");
     assert.equal(tuiActionForKey({ name: "c", ctrl: true }), "quit");
     assert.equal(tuiActionForKey({ name: "x" }), null);
+});
+
+test("renders group management and membership views", () => {
+    const grouped = model([repository()]);
+    grouped.groups = [{ name: "Client work", repositories: ["/work/example"] }];
+    grouped.view = "groups";
+    grouped.groupIndex = 1;
+
+    const groupsOutput = renderTui(grouped, { columns: 90, rows: 24 });
+    assert.match(groupsOutput, /Repository groups/);
+    assert.match(groupsOutput, /› Client work  1 repos/);
+    assert.match(groupsOutput, /n new  e members  r rename  d delete/);
+
+    grouped.view = "members";
+    grouped.editingGroup = "Client work";
+    const membersOutput = renderTui(grouped, { columns: 90, rows: 24 });
+    assert.match(membersOutput, /Edit group: Client work/);
+    assert.match(membersOutput, /› \[x\] example/);
+    assert.match(membersOutput, /Space toggle membership/);
 });
