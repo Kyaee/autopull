@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_TIMEOUT_MS = 20_000;
-const PULL_TIMEOUT_MS = 120_000;
+const NETWORK_TIMEOUT_MS = 120_000;
 
 export class GitCommandError extends Error {
     constructor(args, cause) {
@@ -167,7 +167,7 @@ export const pullRepository = async (repositoryPath) => {
 
     try {
         const { stdout, stderr } = await runGit(repositoryPath, ["pull", "--ff-only"], {
-            timeoutMs: PULL_TIMEOUT_MS,
+            timeoutMs: NETWORK_TIMEOUT_MS,
         });
         const after = await inspectRepository(repositoryPath);
 
@@ -188,3 +188,31 @@ export const pullRepository = async (repositoryPath) => {
     }
 };
 
+export const fetchRepository = async (repositoryPath) => {
+    const before = await inspectRepository(repositoryPath);
+
+    if (!before.upstream) {
+        return {
+            ok: false,
+            message: "Refresh skipped: the current branch has no upstream.",
+            repository: before,
+        };
+    }
+
+    try {
+        const { stdout, stderr } = await runGit(repositoryPath, ["fetch", "--prune"], {
+            timeoutMs: NETWORK_TIMEOUT_MS,
+        });
+        return {
+            ok: true,
+            message: (stdout || stderr).trim() || "Remote state refreshed.",
+            repository: await inspectRepository(repositoryPath),
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            message: error.message,
+            repository: await inspectRepository(repositoryPath).catch(() => before),
+        };
+    }
+};

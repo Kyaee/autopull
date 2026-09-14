@@ -7,21 +7,23 @@ import { fileURLToPath } from "node:url";
 import { discoverRepositories } from "./lib/discovery.mjs";
 import { formatPull, formatScan } from "./lib/format.mjs";
 import { inspectRepository, pullRepository } from "./lib/git.mjs";
-import { envelope, inspectMany, summarize } from "./lib/protocol.mjs";
+import { envelope, inspectMany, refreshMany, summarize } from "./lib/protocol.mjs";
 
 const HELP = `Autopull safely inspects and updates local Git repositories.
 
 Usage:
   autopull scan [roots...] [--json] [--max-depth N]
+  autopull refresh [roots...] [--json] [--max-depth N]
   autopull status <repository> [--json]
   autopull pull <repository> [--json]
 
 Commands:
   scan     Discover repositories and inspect their local Git state
+  refresh  Fetch and then inspect repositories without changing working trees
   status   Inspect one repository
   pull     Pull one clean repository using --ff-only
 
-Scan is read-only. Remote counts reflect the last fetch or pull.`;
+Scan is read-only. Use refresh when remote counts must be current.`;
 
 const parsedArguments = (argv) => {
     const values = [];
@@ -75,6 +77,22 @@ const scan = async (args, io) => {
     return 0;
 };
 
+const refresh = async (args, io) => {
+    const roots = args.values.length > 0 ? args.values.map((root) => resolve(root)) : defaultRoots();
+    const discovery = await discoverRepositories(roots, { maxDepth: args.maxDepth });
+    const refreshResults = await refreshMany(discovery.repositories);
+    const repositories = refreshResults.map((result) => result.repository);
+    const document = envelope("refresh", {
+        roots,
+        summary: summarize(repositories),
+        repositories,
+        refreshResults,
+        discoveryErrors: discovery.errors,
+    });
+    write(io, document, formatScan(document), args.json);
+    return refreshResults.some((result) => !result.ok) ? 1 : 0;
+};
+
 const status = async (args, io) => {
     if (args.values.length !== 1) throw new Error("status requires exactly one repository path.");
     const repository = await inspectRepository(resolve(args.values[0]));
@@ -103,6 +121,7 @@ export const runCli = async (arguments_, io = process) => {
 
     const args = parsedArguments(argv);
     if (command === "scan") return scan(args, io);
+    if (command === "refresh") return refresh(args, io);
     if (command === "status") return status(args, io);
     if (command === "pull") return pull(args, io);
     throw new Error(`Unknown command: ${command}`);

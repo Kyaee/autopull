@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { promisify } from "node:util";
 import { discoverRepositories } from "../../cli/lib/discovery.mjs";
-import { inspectRepository, parsePorcelainV2, pullRepository } from "../../cli/lib/git.mjs";
+import { fetchRepository, inspectRepository, parsePorcelainV2, pullRepository } from "../../cli/lib/git.mjs";
 import { runCli } from "../../cli/autopull.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -107,7 +107,8 @@ test("fast-forwards a clean repository from its upstream", async () => {
     await git(seed, "add", "README.md");
     await git(seed, "commit", "-m", "remote update");
     await git(seed, "push");
-    await git(consumer, "fetch");
+    const refresh = await fetchRepository(consumer);
+    assert.equal(refresh.ok, true);
 
     const before = await inspectRepository(consumer);
     assert.equal(before.behind, 1);

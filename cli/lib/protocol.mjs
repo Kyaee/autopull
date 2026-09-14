@@ -1,4 +1,4 @@
-import { inspectRepository } from "./git.mjs";
+import { fetchRepository, inspectRepository } from "./git.mjs";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -40,6 +40,27 @@ export const inspectMany = async (paths, options = {}) => {
     return results;
 };
 
+export const refreshMany = async (paths, options = {}) => {
+    const concurrency = Math.max(1, Math.min(options.concurrency ?? 3, 8));
+    const results = new Array(paths.length);
+    let cursor = 0;
+
+    const worker = async () => {
+        while (cursor < paths.length) {
+            const index = cursor;
+            cursor += 1;
+            results[index] = await fetchRepository(paths[index]).catch((error) => ({
+                ok: false,
+                message: error.message,
+                repository: errorRepository(paths[index], error),
+            }));
+        }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, paths.length) }, worker));
+    return results;
+};
+
 export const summarize = (repositories) => repositories.reduce((summary, repository) => {
     summary.total += 1;
     if (repository.state === "current") summary.current += 1;
@@ -56,4 +77,3 @@ export const envelope = (command, payload) => ({
     generatedAt: new Date().toISOString(),
     ...payload,
 });
-

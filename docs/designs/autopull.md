@@ -25,6 +25,7 @@ The CLI is the source of truth. It owns discovery, Git status classification, sa
 Initial commands:
 
 - `autopull scan [roots...]` discovers and reports repositories.
+- `autopull refresh [roots...]` fetches remote-tracking metadata without changing working trees.
 - `autopull status <repository>` reports one repository.
 - `autopull pull <repository>` runs a guarded `git pull --ff-only`.
 - `--json` returns the stable protocol used by the GTK app.
