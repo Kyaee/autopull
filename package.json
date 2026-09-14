@@ -1,0 +1,39 @@
+{
+    "name": "autopull",
+    "version": "0.0.1",
+    "private": true,
+    "description": "A GTK4 application built with GTKX",
+    "license": "MIT",
+    "author": "Kyaee <efrohibire@gmail.com>",
+    "type": "module",
+    "imports": {
+        "#data/*": "./data/*"
+    },
+    "scripts": {
+        "dev": "gtkx dev",
+        "build": "gtkx build",
+        "codegen": "gtkx codegen",
+        "typecheck": "gtkx codegen && tsc",
+        "start": "node dist/bundle.mjs",
+        "deploy": "gtkx deploy",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "@gtkx/cairo": "^1.6.0",
+        "@gtkx/css": "^1.6.0",
+        "@gtkx/react": "^1.6.0",
+        "@gtkx/runtime": "^1.6.0",
+        "react": "^19.3.0"
+    },
+    "devDependencies": {
+        "@gtkx/cli": "^1.6.0",
+        "@gtkx/config": "^1.6.0",
+        "@gtkx/mcp": "^1.6.0",
+        "@gtkx/testing": "^1.6.0",
+        "@types/node": "^26.5.1",
+        "@types/react": "^19.3.0",
+        "typescript": "^7.0.2",
+        "vite": "^8.3.0",
+        "vitest": "^5.0.0"
+    }
+}
