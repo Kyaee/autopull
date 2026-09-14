@@ -2,7 +2,7 @@
     "name": "autopull",
     "version": "0.0.1",
     "private": true,
-    "description": "A GTK4 application built with GTKX",
+    "description": "Safely inspect and update multiple local Git repositories",
     "license": "MIT",
     "author": "Kyaee <efrohibire@gmail.com>",
     "type": "module",
