@@ -21,7 +21,9 @@ const paintLine = (line, color) => {
     if (line.startsWith("›")) return `\u001b[1;7m${line}${ANSI_RESET}`;
     if (/^─+$/.test(line)) return `\u001b[2m${line}${ANSI_RESET}`;
     if (line.startsWith("AUTOPULL")) return `\u001b[1m${line}${ANSI_RESET}`;
-    if (/^\s*REPOSITORY\s+BRANCH\s+STATE/.test(line)) return `\u001b[2m${line}${ANSI_RESET}`;
+    if (/^\s*(?:REPOSITORY|BRANCH)\s+/.test(line) && line.includes("STATE")) {
+        return `\u001b[2m${line}${ANSI_RESET}`;
+    }
     if (!color) return line;
 
     return line
@@ -83,7 +85,22 @@ const repositoryColumnWidths = (width) => {
     return { branch, state, remote, name: Math.max(12, width - branch - state - remote - 8) };
 };
 
+const compactRepositoryColumnWidths = (width) => {
+    const branch = Math.min(16, Math.max(6, Math.floor(width * 0.28)));
+    const state = Math.min(12, Math.max(5, Math.floor(width * 0.23)));
+    return { branch, state, name: Math.max(4, width - branch - state - 7) };
+};
+
 const repositoryHeader = (width) => {
+    if (width < 76) {
+        const columns = compactRepositoryColumnWidths(width);
+        return [
+            " ",
+            fit("BRANCH", columns.branch),
+            fit("REPOSITORY", columns.name),
+            fit("STATE", columns.state),
+        ].join(" ");
+    }
     const columns = repositoryColumnWidths(width);
     return [
         " ",
@@ -100,10 +117,8 @@ const repositoryRow = (repository, selected, width) => {
     const branch = branchLabel(repository);
 
     if (width < 76) {
-        const branchWidth = Math.min(16, Math.max(6, Math.floor(width * 0.28)));
-        const stateWidth = Math.min(12, Math.max(5, Math.floor(width * 0.23)));
-        const nameWidth = Math.max(4, width - branchWidth - stateWidth - 7);
-        return [marker, fit(`@${branch}`, branchWidth), fit(repository.name, nameWidth), fit(state, stateWidth)].join(" ");
+        const columns = compactRepositoryColumnWidths(width);
+        return [marker, fit(`@${branch}`, columns.branch), fit(repository.name, columns.name), fit(state, columns.state)].join(" ");
     }
 
     const columns = repositoryColumnWidths(width);
@@ -186,9 +201,9 @@ export const renderTui = (model, terminal = {}) => {
             : "No Git repositories found.";
         lines.push("", model.busy ? "Scanning for Git repositories…" : emptyMessage);
     } else {
-        const listCapacity = Math.max(3, rows - (width >= 76 ? 15 : 14));
+        const listCapacity = Math.max(3, rows - 14);
         const visible = viewport(model.repositories, model.selectedIndex, listCapacity);
-        if (width >= 76) lines.push(repositoryHeader(width));
+        lines.push(repositoryHeader(width));
         for (const [index, repository] of visible.items.entries()) {
             lines.push(repositoryRow(repository, visible.offset + index === model.selectedIndex, width));
         }
