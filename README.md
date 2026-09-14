@@ -23,9 +23,24 @@ sudo dnf install gtk4-devel
 
 The project includes a compatibility pkg-config entry because current GTKX releases query Fedora's older `gobject-introspection-1.0` package name.
 
-## CLI
+## Terminal UI
 
-Install dependencies, then run the package script:
+Install dependencies, then open the interactive dashboard:
+
+```sh
+pnpm install
+pnpm autopull
+```
+
+Use `j`/`k` or the arrow keys to select a repository. Press `s` to scan local state, `r` to fetch and refresh remote state, `p` to fast-forward the selected repository when it is safe, and `q` to exit. Pass roots after the explicit `tui` command when you do not want the configured defaults:
+
+```sh
+pnpm autopull -- tui ~/Repos ~/work --max-depth 4
+```
+
+## Scriptable commands
+
+The non-interactive commands remain available for scripts and for the GTK app:
 
 ```sh
 pnpm install

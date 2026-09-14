@@ -8,16 +8,20 @@ import { discoverRepositories } from "./lib/discovery.mjs";
 import { formatPull, formatScan } from "./lib/format.mjs";
 import { inspectRepository, pullRepository } from "./lib/git.mjs";
 import { envelope, inspectMany, refreshMany, summarize } from "./lib/protocol.mjs";
+import { runTui } from "./lib/tui.mjs";
 
 const HELP = `Autopull safely inspects and updates local Git repositories.
 
 Usage:
+  autopull
+  autopull tui [roots...] [--max-depth N]
   autopull scan [roots...] [--json] [--max-depth N]
   autopull refresh [roots...] [--json] [--max-depth N]
   autopull status <repository> [--json]
   autopull pull <repository> [--json]
 
 Commands:
+  tui      Open the interactive terminal dashboard (the default)
   scan     Discover repositories and inspect their local Git state
   refresh  Fetch and then inspect repositories without changing working trees
   status   Inspect one repository
@@ -114,7 +118,15 @@ const pull = async (args, io) => {
 export const runCli = async (arguments_, io = process) => {
     const rawArguments = [...arguments_];
     if (rawArguments[0] === "--") rawArguments.shift();
-    const [command = "help", ...argv] = rawArguments;
+    const [command, ...argv] = rawArguments;
+
+    if (!command) {
+        if (io.stdin?.isTTY && io.stdout?.isTTY) {
+            return runTui({ roots: defaultRoots(), maxDepth: 4 }, io);
+        }
+        io.stdout.write(`${HELP}\n`);
+        return 0;
+    }
 
     if (command === "help" || command === "--help" || command === "-h") {
         io.stdout.write(`${HELP}\n`);
@@ -122,6 +134,10 @@ export const runCli = async (arguments_, io = process) => {
     }
 
     const args = parsedArguments(argv);
+    if (command === "tui") {
+        const roots = args.values.length > 0 ? args.values.map((root) => resolve(root)) : defaultRoots();
+        return runTui({ roots, maxDepth: args.maxDepth }, io);
+    }
     if (command === "scan") return scan(args, io);
     if (command === "refresh") return refresh(args, io);
     if (command === "status") return status(args, io);
