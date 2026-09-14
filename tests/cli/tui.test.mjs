@@ -47,6 +47,7 @@ test("renders repository state, selected details, and TUI controls", () => {
     const output = renderTui(model([repository()]), { columns: 100, rows: 30 });
 
     assert.match(output, /AUTOPULL  1 repos  1 ready/);
+    assert.match(output, /REPOSITORY\s+BRANCH\s+STATE\s+REMOTE/);
     assert.match(output, /› example/);
     assert.match(output, /Branch  main  →  origin\/main/);
     assert.match(output, /Ready to fast-forward\. Press p to pull/);
@@ -96,6 +97,14 @@ test("renders group management and membership views", () => {
     grouped.editingGroup = "Client work";
     const membersOutput = renderTui(grouped, { columns: 90, rows: 24 });
     assert.match(membersOutput, /Edit group: Client work/);
-    assert.match(membersOutput, /› \[x\] example/);
+    assert.match(membersOutput, /› \[x\] @main  example/);
     assert.match(membersOutput, /Space toggle membership/);
+});
+
+test("keeps the current branch visible in a narrow terminal", () => {
+    const output = renderTui(model([repository({ branch: "feature/groups" })]), { columns: 60, rows: 24 });
+
+    assert.match(output, /› @feature\/groups\s+example/);
+    assert.match(output, /Branch  feature\/groups  →  origin\/main/);
+    assert.ok(output.split("\n").every((line) => line.length === 60));
 });

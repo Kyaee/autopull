@@ -58,25 +58,45 @@ const viewport = (items, selectedIndex, capacity) => {
     return { items: items.slice(offset, offset + capacity), offset };
 };
 
+const branchLabel = (repository) => repository.detached ? "detached" : repository.branch ?? "unknown";
+
+const repositoryColumnWidths = (width) => {
+    const branch = Math.min(20, Math.max(12, Math.floor(width * 0.2)));
+    const state = 14;
+    const remote = Math.min(24, Math.max(14, Math.floor(width * 0.22)));
+    return { branch, state, remote, name: Math.max(12, width - branch - state - remote - 8) };
+};
+
+const repositoryHeader = (width) => {
+    const columns = repositoryColumnWidths(width);
+    return [
+        " ",
+        fit("REPOSITORY", columns.name),
+        fit("BRANCH", columns.branch),
+        fit("STATE", columns.state),
+        fit("REMOTE", columns.remote),
+    ].join(" ");
+};
+
 const repositoryRow = (repository, selected, width) => {
     const marker = selected ? "›" : " ";
     const state = stateLabel(repository);
+    const branch = branchLabel(repository);
 
     if (width < 76) {
-        const available = Math.max(8, width - state.length - 5);
-        return `${marker} ${fit(repository.name, available)}  ${state}`;
+        const branchWidth = Math.min(16, Math.max(6, Math.floor(width * 0.28)));
+        const stateWidth = Math.min(12, Math.max(5, Math.floor(width * 0.23)));
+        const nameWidth = Math.max(4, width - branchWidth - stateWidth - 7);
+        return [marker, fit(`@${branch}`, branchWidth), fit(repository.name, nameWidth), fit(state, stateWidth)].join(" ");
     }
 
-    const branchWidth = Math.min(20, Math.max(12, Math.floor(width * 0.2)));
-    const stateWidth = 14;
-    const remoteWidth = Math.min(24, Math.max(14, Math.floor(width * 0.22)));
-    const nameWidth = Math.max(12, width - branchWidth - stateWidth - remoteWidth - 8);
+    const columns = repositoryColumnWidths(width);
     return [
         marker,
-        fit(repository.name, nameWidth),
-        fit(repository.branch ?? "detached", branchWidth),
-        fit(state, stateWidth),
-        fit(remoteLabel(repository), remoteWidth),
+        fit(repository.name, columns.name),
+        fit(branch, columns.branch),
+        fit(state, columns.state),
+        fit(remoteLabel(repository), columns.remote),
     ].join(" ");
 };
 
@@ -124,7 +144,7 @@ const renderMembers = (model, lines, width, rows) => {
     for (const [index, repository] of visible.items.entries()) {
         const marker = visible.offset + index === model.memberIndex ? "›" : " ";
         const checked = paths.has(repository.path) ? "[x]" : "[ ]";
-        lines.push(fit(`${marker} ${checked} ${repository.name}`, width));
+        lines.push(fit(`${marker} ${checked} @${branchLabel(repository)}  ${repository.name}`, width));
     }
     if (model.allRepositories.length === 0) lines.push("No scanned repositories.");
 };
@@ -150,8 +170,9 @@ export const renderTui = (model, terminal = {}) => {
             : "No Git repositories found.";
         lines.push("", model.busy ? "Scanning for Git repositories…" : emptyMessage);
     } else {
-        const listCapacity = Math.max(3, rows - 14);
+        const listCapacity = Math.max(3, rows - (width >= 76 ? 15 : 14));
         const visible = viewport(model.repositories, model.selectedIndex, listCapacity);
+        if (width >= 76) lines.push(repositoryHeader(width));
         for (const [index, repository] of visible.items.entries()) {
             lines.push(repositoryRow(repository, visible.offset + index === model.selectedIndex, width));
         }
