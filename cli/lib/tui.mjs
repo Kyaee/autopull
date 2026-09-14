@@ -15,6 +15,22 @@ import { inspectMany, pullMany, refreshMany, summarize } from "./protocol.mjs";
 const ENTER_ALTERNATE_SCREEN = "\u001b[?1049h\u001b[?25l";
 const LEAVE_ALTERNATE_SCREEN = "\u001b[?25h\u001b[?1049l";
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
+const ANSI_RESET = "\u001b[0m";
+
+const paintLine = (line, color) => {
+    if (line.startsWith("›")) return `\u001b[1;7m${line}${ANSI_RESET}`;
+    if (/^─+$/.test(line)) return `\u001b[2m${line}${ANSI_RESET}`;
+    if (line.startsWith("AUTOPULL")) return `\u001b[1m${line}${ANSI_RESET}`;
+    if (/^\s*REPOSITORY\s+BRANCH\s+STATE/.test(line)) return `\u001b[2m${line}${ANSI_RESET}`;
+    if (!color) return line;
+
+    return line
+        .replace(/\b(CONFLICT(?: \d+)?|ERROR)\b/g, "\u001b[1;31m$1\u001b[0m")
+        .replace(/\b(DIRTY(?: \d+)?|NO-UPSTREAM|DETACHED)\b/g, "\u001b[33m$1\u001b[0m")
+        .replace(/\b(BEHIND(?: \d+)?|READY)\b/g, "\u001b[36m$1\u001b[0m")
+        .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
+        .replace(/\bCURRENT\b/g, "\u001b[2m$&\u001b[0m");
+};
 
 const stateLabel = (repository) => {
     if (repository.state === "behind") return `BEHIND ${repository.behind}`;
@@ -206,7 +222,8 @@ export const renderTui = (model, terminal = {}) => {
     if (model.view === "members") controls = "↑/k up  ↓/j down  Space toggle membership  Enter/Esc done";
     if (model.modal) controls = model.modal.kind === "input" ? "Type a group name" : "y confirm  n/Esc cancel";
     const footer = [fit(status, width), fit(controls, width)];
-    return cropLines(lines, rows, footer).map((line) => fit(line, width)).join("\n");
+    const fitted = cropLines(lines, rows, footer).map((line) => fit(line, width));
+    return (terminal.style || terminal.color ? fitted.map((line) => paintLine(line, terminal.color)) : fitted).join("\n");
 };
 
 export const tuiActionForKey = (key = {}) => {
@@ -265,7 +282,8 @@ export const runTui = async (options, io = process, services = {}) => {
 
     const draw = () => {
         if (!active) return;
-        output.write(`${CLEAR_SCREEN}${renderTui(model, output)}`);
+        const color = options.color ?? (process.env.NO_COLOR === undefined && process.env.TERM !== "dumb");
+        output.write(`${CLEAR_SCREEN}${renderTui(model, { columns: output.columns, rows: output.rows, style: true, color })}`);
     };
 
     const applyGroupFilter = () => {
