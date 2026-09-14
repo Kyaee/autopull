@@ -27,7 +27,7 @@ const paintLine = (line, color) => {
     if (!color) return line;
 
     return line
-        .replace(/\b(CONFLICT(?: \d+)?|ERROR)\b/g, "\u001b[1;31m$1\u001b[0m")
+        .replace(/\b(CONFLICT(?: \d+)?|ERROR|BLOCKED)\b/g, "\u001b[1;31m$1\u001b[0m")
         .replace(/\b(DIRTY(?: \d+)?|NO-UPSTREAM|DETACHED)\b/g, "\u001b[33m$1\u001b[0m")
         .replace(/\b(BEHIND(?: \d+)?|READY)\b/g, "\u001b[36m$1\u001b[0m")
         .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
@@ -137,8 +137,71 @@ const actionLabel = (repository) => {
     return "No update is waiting";
 };
 
+const DETAIL_ROWS = 10;
+
+const wrapText = (value, width) => {
+    if (width <= 1) return [String(value).slice(0, Math.max(0, width))];
+    const source = String(value);
+    const words = [...source.matchAll(/\S+/gu)];
+    if (words.length === 0) return [""];
+    const lines = [];
+    let line = "";
+    let previousEnd = 0;
+    for (const match of words) {
+        const word = match[0];
+        const separator = source.slice(previousEnd, match.index);
+        const addition = line ? `${separator}${word}` : word;
+        if (!line) {
+            line = word;
+        } else if (line.length + addition.length <= width) {
+            line += addition;
+        } else {
+            lines.push(line);
+            line = word;
+        }
+        previousEnd = match.index + word.length;
+    }
+    if (line) lines.push(line);
+    return lines.flatMap((candidate) => candidate.length <= width
+        ? [candidate]
+        : Array.from({ length: Math.ceil(candidate.length / width) }, (_, index) => candidate.slice(index * width, (index + 1) * width)));
+};
+
+const labeledLines = (label, value, width) => {
+    const labelWidth = 8;
+    const contentWidth = Math.max(1, width - labelWidth);
+    return wrapText(value, contentWidth).map((line, index) => fit(`${index === 0 ? fit(label, labelWidth) : " ".repeat(labelWidth)}${line}`, width));
+};
+
+const limitedLabeledLines = (label, value, width, limit) => {
+    const lines = labeledLines(label, value, width);
+    if (lines.length <= limit) return lines;
+    const visible = lines.slice(0, limit);
+    visible[limit - 1] = fit(`${visible[limit - 1].trimEnd().slice(0, Math.max(0, width - 1))}…`, width);
+    return visible;
+};
+
+const repositoryDetailLines = (repository, width) => {
+    const firstChange = repository.changedFiles[0]?.path;
+    const lines = [
+        "─".repeat(width),
+        fit(`${repository.name}  ${stateLabel(repository)}`, width),
+        fit(repository.path, width),
+        ...limitedLabeledLines("Branch", `${branchLabel(repository)}  →  ${repository.upstream ?? "no upstream"}`, width, 2),
+        ...limitedLabeledLines("State", `${worktreeLabel(repository)}; remote ${remoteLabel(repository)}`, width, 2),
+        ...limitedLabeledLines("Action", actionLabel(repository), width, 2),
+    ];
+    if (firstChange) {
+        const remaining = repository.changedFiles.length - 1;
+        lines.push(fit(`Files   ${firstChange}${remaining > 0 ? ` (+${remaining} more)` : ""}`, width));
+    }
+    return lines;
+};
+
 const cropLines = (lines, rows, footer) => {
-    if (lines.length + footer.length <= rows) return [...lines, ...footer];
+    if (lines.length + footer.length <= rows) {
+        return [...lines, ...Array.from({ length: rows - lines.length - footer.length }, () => ""), ...footer];
+    }
     const visibleContent = Math.max(1, rows - footer.length);
     return [...lines.slice(0, visibleContent), ...footer];
 };
@@ -201,38 +264,25 @@ export const renderTui = (model, terminal = {}) => {
             : "No Git repositories found.";
         lines.push("", model.busy ? "Scanning for Git repositories…" : emptyMessage);
     } else {
-        const listCapacity = Math.max(3, rows - 14);
+        const selected = model.repositories[model.selectedIndex];
+        const detailLines = selected ? repositoryDetailLines(selected, width) : [];
+        const listCapacity = Math.max(3, rows - lines.length - DETAIL_ROWS - 3);
         const visible = viewport(model.repositories, model.selectedIndex, listCapacity);
         lines.push(repositoryHeader(width));
         for (const [index, repository] of visible.items.entries()) {
             lines.push(repositoryRow(repository, visible.offset + index === model.selectedIndex, width));
         }
-
-        const selected = model.repositories[model.selectedIndex];
-        if (selected) {
-            const changePreview = selected.changedFiles.slice(0, 3).map((file) => file.path).join(", ");
-            const remaining = Math.max(0, selected.changedFiles.length - 3);
-            lines.push(
-                "",
-                "─".repeat(width),
-                fit(`${selected.name}  ${selected.path}`, width),
-                fit(`Branch  ${selected.branch ?? "detached"}  →  ${selected.upstream ?? "no upstream"}`, width),
-                fit(`State   ${worktreeLabel(selected)}; remote ${remoteLabel(selected)}`, width),
-                fit(`Action  ${actionLabel(selected)}`, width),
-            );
-            if (changePreview) {
-                lines.push(fit(`Files   ${changePreview}${remaining > 0 ? `, +${remaining} more` : ""}`, width));
-            }
-        }
+        lines.push(...detailLines);
     }
 
     if (model.discoveryErrors.length > 0) {
         lines.push(fit(`Warning  ${model.discoveryErrors[0].path}: ${model.discoveryErrors[0].message}`, width));
     }
 
-    const status = model.notification || `Roots: ${model.roots.join(":")}`;
-    let controls = "↑/k up  ↓/j down  s scan  r refresh  p pull  g groups  q quit";
-    if (model.activeGroup) controls = "↑/k up  ↓/j down  p pull  a pull group  g groups  q quit";
+    const scope = model.activeGroup ?? "All repositories";
+    const status = model.notification ? `STATUS  ${model.notification}` : `SCOPE   ${scope}  ${model.roots.join(":")}`;
+    let controls = "↑↓/jk move  s scan  r refresh  p pull  g groups  q quit";
+    if (model.activeGroup) controls = "↑↓/jk move  p pull  a pull group  g groups  q quit";
     if (model.view === "groups") controls = "↑/k up  ↓/j down  Enter use  n new  e members  r rename  d delete  Esc back";
     if (model.view === "members") controls = "↑/k up  ↓/j down  Space toggle membership  Enter/Esc done";
     if (model.modal) controls = model.modal.kind === "input" ? "Type a group name" : "y confirm  n/Esc cancel";
