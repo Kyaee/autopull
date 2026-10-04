@@ -108,13 +108,20 @@ test("hides multiple marks in one saved exclusion update and clears removed mark
     ui.key("q"); await ui.running;
 });
 
-test("select-all respects the group filter, scans retain visible marks, and fetch reloads exclusions", async (t) => {
+test("select-all toggles within the group filter, scans retain visible marks, and fetch reloads exclusions", async (t) => {
     let excluded = [];
     const fetched = [];
     const ui = await harness(t, {
         loadExclusions: async () => excluded,
         refreshMany: async (paths) => { fetched.push(paths); return repositories.filter((repo) => paths.includes(repo.path)).map((repo) => ({ ok: true, repository: repo })); },
     });
+    ui.command("v");
+    assert.match(ui.frames.at(-1), /4 selected/);
+    ui.command("v");
+    assert.doesNotMatch(ui.frames.at(-1), /\d+ selected|\[x\]/);
+    assert.match(ui.frames.at(-1), /› .*one/);
+    ui.key("space");
+    assert.match(ui.frames.at(-1), /1 selected/);
     ui.command("v");
     assert.match(ui.frames.at(-1), /4 selected/);
     ui.command("s");
@@ -127,7 +134,10 @@ test("select-all respects the group filter, scans retain visible marks, and fetc
     assert.match(ui.frames.at(-1), /2 selected/);
     ui.command("g"); ui.key("k"); ui.key("return");
     assert.match(ui.frames.at(-1), /1 selected/);
-    ui.command("c"); ui.command("v");
+    ui.command("v");
+    assert.doesNotMatch(ui.frames.at(-1), /\[x\]|\d+ selected/);
+    assert.match(ui.frames.at(-1), /› .*two/);
+    ui.command("v");
     assert.equal((ui.frames.at(-1).match(/\[x\]/g) ?? []).length, 1);
     ui.key("space");
     assert.doesNotMatch(ui.frames.at(-1), /\[x\]|\d+ selected/);

@@ -4,6 +4,7 @@ import { access, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { discoverCodingAgents, launchCodingAgent, resolveCodingAgent } from "./agents.mjs";
+import { listRepositoryBranches, switchRepositoryBranch } from "./branches.mjs";
 import { canonicalDirectory, isDirectoryExcluded, loadExclusions, saveExclusions } from "./exclusions.mjs";
 import { discoverRepositories } from "./discovery.mjs";
 import { stashRepositoryChanges } from "./stash.mjs";
@@ -24,12 +25,14 @@ const LEAVE_ALTERNATE_SCREEN = "\u001b[?25h\u001b[?1049l";
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const ANSI_RESET = "\u001b[0m";
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const PREFIX_ACTIONS = new Set(["scan", "root", "fix", "stash", "delete", "exclusions", "groups", "pull-group", "select-all", "clear-selection"]);
-const prefixCommands = (model) => [
-    ["s", "scan"], ["x", "fix"], ["z", "stash"], ["d", "hide"],
+const PREFIX_ACTIONS = new Set(["scan", "branch", "root", "fix", "stash", "delete", "exclusions", "groups", "pull-group", "select-all", "clear-selection"]);
+const allVisibleMarked = (model) => model.repositories.length > 0
+    && model.repositories.every((repository) => model.markedPaths?.includes(repository.path));
+const prefixCommands = (model, compact = false) => [
+    ["s", "scan"], ["b", "branch"], ["x", "fix"], ["z", "stash"], ["d", "hide"],
     ["h", "hidden"], ["g", "groups"], ["o", "root"],
-    ...(model.activeGroup ? [["a", "group pull"]] : []),
-    ["v", "all"], ["c", "clear"],
+    ...(model.activeGroup ? [["a", compact ? "group" : "group pull"]] : []),
+    ["v", allVisibleMarked(model) ? compact ? "unselect" : "unselect all" : "all"], ["c", "clear"],
 ];
 
 const commandLines = (entries, width) => {
@@ -76,8 +79,8 @@ const floatingCommands = (lines, model, width, terminal, controlRows) => {
     if (!model.prefixArmed || model.modal || model.view !== "repositories") return lines;
     const compact = width < 40;
     const popupWidth = compact ? width : Math.min(64, width - 8);
-    const commands = [...prefixCommands(model).map(([key, label]) => `${key} ${label}`), "Esc cancel"];
-    const content = commandLines(compact ? ["Ctrl+A", ...commands] : commands, popupWidth - (compact ? 0 : 4));
+    const commands = [...prefixCommands(model, compact).map(([key, label]) => `${key} ${label}`), "Esc cancel"];
+    const content = commandLines(compact ? ["^A", ...commands] : commands, popupWidth - (compact ? 0 : 4));
     const popup = (compact ? content.map((value) => fit(value, popupWidth))
         : panel("Ctrl+A / commands", content, popupWidth, content.length + 2, { color: false, style: false }))
         .map((line) => terminal.color ? `\u001b[1;97;44m${line}${ANSI_RESET}`
@@ -111,7 +114,7 @@ const paintLine = (line, color) => {
         .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
         .replace(/\bCURRENT\b/g, "\u001b[32m$&\u001b[0m")
         .replace(/(█+|░+)/gu, "\u001b[36m$1\u001b[0m")
-        .replace(/(?<![\p{L}\p{N}])(↑↓ jk|Ctrl\+A|\^A|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxhzvc])(?= (?:move|mark|more|scan|fetch|fix|stash|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add|all|clear))/gu,
+        .replace(/(?<![\p{L}\p{N}])(↑↓ jk|Ctrl\+A|\^A|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxhzvc])(?= (?:move|mark|more|scan|switch|fetch|fix|stash|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add|all|clear))/gu,
             "\u001b[1;36m$1\u001b[0m");
 };
 
@@ -318,6 +321,7 @@ const repositoryDetailLines = (repository, width) => {
 };
 
 const selectedGroup = (model) => model.groupIndex === 0 ? null : model.groups[model.groupIndex - 1];
+const branchChoiceLabel = (branch) => `${branch.name}${branch.current ? "  current" : branch.remote ? "  remote" : ""}`;
 
 // Fit before adding ANSI escapes so borders remain aligned in every color mode.
 const panel = (title, content, width, height, terminal, accent = 36) => {
@@ -370,6 +374,10 @@ export const renderTui = (model, terminal = {}) => {
             const visible = viewport(model.modal.agents, model.modal.selectedIndex, rows - 3);
             compact = [`Fix ${model.modal.repository.name}`, "Choose a coding CLI",
                 ...visible.items.map((agent, index) => `${visible.offset + index === model.modal.selectedIndex ? "›" : " "} ${agent.name}`)];
+        } else if (model.modal?.kind === "branches") {
+            const visible = viewport(model.modal.branches, model.modal.selectedIndex, rows - 3);
+            compact = [`Branch / ${model.modal.repository.name}`, `Current: ${branchLabel(model.modal.repository)}`,
+                ...visible.items.map((branch, index) => `${visible.offset + index === model.modal.selectedIndex ? "›" : " "} ${branchChoiceLabel(branch)}`)];
         } else if (model.modal?.kind === "input") {
             compact = [model.modal.heading ?? "group / name", ...wrapText(model.modal.title, width).slice(0, rows - 4),
                 `> ${model.modal.value}_`];
@@ -383,7 +391,7 @@ export const renderTui = (model, terminal = {}) => {
         }
         while (compact.length < rows - 1) compact.push("");
         const controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
-            ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : model.modal.kind === "agents" || model.modal.heading === "coding CLI" ? "open" : "save")} Esc cancel`
+            ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : model.modal.kind === "branches" ? "switch" : model.modal.kind === "agents" || model.modal.heading === "coding CLI" ? "open" : "save")} Esc cancel`
             : model.view === "exclusions" ? "Esc back q quit" : width < 40 ? "Ctrl+A more q quit" : "↑↓ jk move Space mark Ctrl+A more q quit";
         const lines = [...compact.map((line) => paintContent(line, width, terminal)), paintContent(controls, width, terminal)];
         return floatingCommands(lines, model, width, terminal, 1).join("\n");
@@ -406,6 +414,15 @@ export const renderTui = (model, terminal = {}) => {
         content = [...heading,
             ...visible.items.map((agent, index) => `${visible.offset + index === model.modal.selectedIndex ? "›" : " "} ${agent.name}${agent.command ? ` (${agent.command})` : ""}`),
         ];
+    } else if (model.modal?.kind === "branches") {
+        title = `branch / ${model.modal.repository.name}`;
+        accent = 34;
+        const heading = bodyHeight >= 7
+            ? [fit(model.modal.repository.path, width - 4), `Current: ${branchLabel(model.modal.repository)}. Choose a branch, then Enter.`, ""]
+            : [];
+        const visible = viewport(model.modal.branches, model.modal.selectedIndex, Math.max(1, bodyHeight - 2 - heading.length));
+        content = [...heading, ...visible.items.map((branch, index) =>
+            `${visible.offset + index === model.modal.selectedIndex ? "›" : " "} ${branchChoiceLabel(branch)}`)];
     } else if (model.modal) {
         title = model.modal.kind === "input" ? model.modal.heading ?? "group / name" : "confirmation";
         accent = 33;
@@ -462,6 +479,7 @@ export const renderTui = (model, terminal = {}) => {
     if (model.view === "members") controls = "↑↓ jk move  Space toggle membership  Enter/Esc done";
     if (model.view === "exclusions") controls = "↑↓ jk Enter restore e edit n add Esc back q quit";
     if (model.modal) controls = model.modal.kind === "agents" ? "↑↓ jk move  Enter open  Esc cancel"
+        : model.modal.kind === "branches" ? "↑↓ jk move  Enter switch  Esc cancel"
         : model.modal.kind === "input" ? model.modal.heading === "coding CLI"
         ? "Type a CLI command  Enter open  Esc cancel"
         : model.modal.heading === "root folder"
@@ -469,7 +487,7 @@ export const renderTui = (model, terminal = {}) => {
         : model.modal.heading === "excluded directory"
         ? "Type a folder path  Enter save  Esc cancel"
         : "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
-    if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
+    if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal?.kind === "branches" ? "Enter switch Esc" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
     lines.push(...panel("controls", [controls], width, 3, terminal));
     return floatingCommands(lines.slice(0, rows), model, width, terminal, 3).join("\n");
 };
@@ -483,6 +501,7 @@ export const tuiActionForKey = (key = {}) => {
     if (key.name === "up" || key.name === "j") return "up";
     if (key.name === "down" || key.name === "k") return "down";
     if (key.name === "s") return "scan";
+    if (key.name === "b") return "branch";
     if (key.name === "f" || key.name === "r") return "fetch";
     if (key.name === "o") return "root";
     if (key.name === "x") return "fix";
@@ -513,6 +532,8 @@ export const runTui = async (options, io = process, services = {}) => {
     const fetch = services.refreshMany ?? refreshMany;
     const pull = services.pullRepository ?? pullRepository;
     const stashChanges = services.stashRepositoryChanges ?? stashRepositoryChanges;
+    const listBranches = services.listRepositoryBranches ?? listRepositoryBranches;
+    const switchBranch = services.switchRepositoryBranch ?? switchRepositoryBranch;
     const pullGroup = services.pullMany ?? pullMany;
     const readGroups = services.loadGroups ?? loadGroups;
     const writeGroups = services.saveGroups ?? saveGroups;
@@ -949,6 +970,53 @@ export const runTui = async (options, io = process, services = {}) => {
         draw();
     };
 
+    const changeBranch = async (repository, ref) => {
+        model.busy = true;
+        model.activity = `Changing branch in ${repository.name}`;
+        model.notification = "";
+        draw();
+        try {
+            const result = await switchBranch(repository.path, ref, { exclusionsPath: options.exclusionsPath });
+            replaceRepository(result.repository);
+            model.notification = `${result.ok ? "Branch" : result.blocked ? "Blocked" : "Failed"}: ${result.message}`;
+        } catch (error) {
+            model.notification = `Branch change failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+            model.busy = false;
+            model.activity = "";
+            draw();
+        }
+    };
+
+    const openBranchPicker = async () => {
+        const repository = model.repositories[model.selectedIndex];
+        if (!repository) {
+            model.notification = "Select a repository to change branches.";
+            draw();
+            return;
+        }
+        model.busy = true;
+        model.activity = `Loading branches in ${repository.name}`;
+        model.notification = "";
+        draw();
+        try {
+            const result = await listBranches(repository.path);
+            if (!active) return;
+            replaceRepository(result.repository);
+            if (!result.branches.length) model.notification = "No branches found. Commit first, or fetch remote branches.";
+            else model.modal = {
+                kind: "branches", repository: result.repository, branches: result.branches,
+                selectedIndex: Math.max(0, result.branches.findIndex((branch) => branch.current)),
+            };
+        } catch (error) {
+            model.notification = `Cannot load branches: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+            model.busy = false;
+            model.activity = "";
+            draw();
+        }
+    };
+
     const createRepositoryGroup = () => {
         openNamePrompt("New group name", "", async (name) => {
             await changeGroups(
@@ -1154,6 +1222,22 @@ export const runTui = async (options, io = process, services = {}) => {
         const handleModalKey = (text, key) => {
             if (!model.modal) return false;
             const modal = model.modal;
+            if (modal.kind === "branches") {
+                const action = tuiActionForKey(key);
+                if (action === "up" || action === "down") {
+                    modal.selectedIndex = Math.max(0, Math.min(modal.branches.length - 1,
+                        modal.selectedIndex + (action === "up" ? -1 : 1)));
+                    draw();
+                } else if (action === "back" || action === "quit") {
+                    model.modal = null;
+                    draw();
+                } else if (action === "enter") {
+                    const branch = modal.branches[modal.selectedIndex];
+                    model.modal = null;
+                    void changeBranch(modal.repository, branch.ref);
+                }
+                return true;
+            }
             if (modal.kind === "agents") {
                 const action = tuiActionForKey(key);
                 if (action === "up" || action === "down") {
@@ -1291,7 +1375,7 @@ export const runTui = async (options, io = process, services = {}) => {
                 model.notification = "";
                 draw();
             } else if (action === "select-all") {
-                model.markedPaths = model.repositories.map((repository) => repository.path);
+                model.markedPaths = allVisibleMarked(model) ? [] : model.repositories.map((repository) => repository.path);
                 model.notification = "";
                 draw();
             } else if (action === "clear-selection") {
@@ -1300,6 +1384,8 @@ export const runTui = async (options, io = process, services = {}) => {
                 draw();
             } else if (action === "root") {
                 changeRootFolder();
+            } else if (action === "branch") {
+                void openBranchPicker();
             } else if (action === "fix") {
                 void openFixPicker();
             } else if (action === "stash") {
