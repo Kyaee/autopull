@@ -16,6 +16,7 @@ const ENTER_ALTERNATE_SCREEN = "\u001b[?1049h\u001b[?25l";
 const LEAVE_ALTERNATE_SCREEN = "\u001b[?25h\u001b[?1049l";
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const ANSI_RESET = "\u001b[0m";
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const paintLine = (line, color) => {
     if (line.startsWith("›")) return `\u001b[1;7m${line}${ANSI_RESET}`;
@@ -241,7 +242,7 @@ export const renderTui = (model, terminal = {}) => {
         overview.push(`CURRENT ${summary.current}  READY ${summary.updatesReady}  DIRTY ${summary.dirty}`);
     }
     const warning = model.discoveryErrors[0];
-    const status = model.busy ? `● ${model.activity}…` : model.notification ? `STATUS  ${model.notification}`
+    const status = model.busy ? `${SPINNER_FRAMES[(model.spinnerFrame ?? 0) % SPINNER_FRAMES.length]} ${model.activity}…` : model.notification ? `STATUS  ${model.notification}`
         : warning ? `Warning  ${warning.path}: ${warning.message}` : `SCOPE   ${scope}  ${model.roots.join(":")}`;
     overview.push(status);
     if (rows < 12) {
@@ -352,6 +353,7 @@ export const runTui = async (options, io = process, services = {}) => {
     const writeGroups = services.saveGroups ?? saveGroups;
     const roots = options.roots;
     let active = true;
+    let animationTimer = null;
     const model = {
         roots,
         allRepositories: [],
@@ -368,13 +370,23 @@ export const runTui = async (options, io = process, services = {}) => {
         modal: null,
         busy: false,
         activity: "",
+        spinnerFrame: 0,
         notification: "",
     };
 
     const draw = () => {
         if (!active) return;
+        clearTimeout(animationTimer);
+        animationTimer = null;
+        if (!model.busy) model.spinnerFrame = 0;
         const color = options.color ?? (process.env.NO_COLOR === undefined && process.env.TERM !== "dumb");
         output.write(`${CLEAR_SCREEN}${renderTui(model, { columns: output.columns, rows: output.rows, style: true, color })}`);
+        if (model.busy) {
+            animationTimer = setTimeout(() => {
+                model.spinnerFrame = (model.spinnerFrame + 1) % SPINNER_FRAMES.length;
+                draw();
+            }, 100);
+        }
     };
 
     const applyGroupFilter = () => {
@@ -636,6 +648,7 @@ export const runTui = async (options, io = process, services = {}) => {
             if (finished) return;
             finished = true;
             active = false;
+            clearTimeout(animationTimer);
             input.off("keypress", onKeypress);
             output.off?.("resize", onResize);
             if (!wasRaw) input.setRawMode(false);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { renderTui, tuiActionForKey } from "../../cli/lib/tui.mjs";
+import { renderTui, runTui, tuiActionForKey } from "../../cli/lib/tui.mjs";
 
 const repository = (overrides = {}) => ({
     path: "/work/example",
@@ -108,3 +109,58 @@ test("keeps the current branch visible in a narrow terminal", () => {
     assert.match(output, /Branch  feature\/groups  →  origin\/main/);
     assert.ok(output.split("\n").every((line) => line.length === 60));
 });
+
+for (const outcome of ["success", "failure", "quit"]) {
+    test(`animates a pending refresh and stops on ${outcome}`, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout"] });
+        const input = Object.assign(new EventEmitter(), {
+            isTTY: true,
+            isRaw: false,
+            setRawMode() {},
+            resume() {},
+        });
+        const frames = [];
+        const output = Object.assign(new EventEmitter(), {
+            isTTY: true,
+            columns: 100,
+            rows: 30,
+            write(frame) { frames.push(frame); },
+        });
+        const pending = Promise.withResolvers();
+        let refreshCalls = 0;
+        const running = runTui({ roots: ["/work"], color: false }, { stdin: input, stdout: output }, {
+            discoverRepositories: async () => ({ repositories: ["/work/example"], errors: [] }),
+            inspectMany: async () => [repository()],
+            loadGroups: async () => [],
+            refreshMany: () => { refreshCalls += 1; return pending.promise; },
+        });
+        t.after(() => input.emit("keypress", "q", { name: "q" }));
+        const settle = () => new Promise((resolve) => setImmediate(resolve));
+        await settle();
+        input.emit("keypress", "r", { name: "r" });
+        await settle();
+        assert.match(frames.at(-1), /⠋ Refreshing remotes…/);
+        assert.match(frames.at(-1), /› example/);
+        t.mock.timers.tick(100);
+        assert.match(frames.at(-1), /⠙ Refreshing remotes…/);
+        input.emit("keypress", "r", { name: "r" });
+        assert.equal(refreshCalls, 1);
+
+        if (outcome === "quit") {
+            input.emit("keypress", "q", { name: "q" });
+            await running;
+        }
+        if (outcome === "failure") pending.reject(new Error("Fetch unavailable"));
+        else pending.resolve([{ ok: true, repository: repository() }]);
+        await settle();
+        if (outcome !== "quit") {
+            assert.match(frames.at(-1), outcome === "success" ? /Remote state refreshed\./ : /Failed: Fetch unavailable/);
+            assert.doesNotMatch(frames.at(-1), /Refreshing remotes…/);
+        }
+        const count = frames.length;
+        t.mock.timers.tick(500);
+        assert.equal(frames.length, count);
+        input.emit("keypress", "q", { name: "q" });
+        await running;
+    });
+}
