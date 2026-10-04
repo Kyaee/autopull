@@ -38,6 +38,17 @@ Press `o` in the repository view to change the root folder for the current sessi
 
 Repository names are red for errors or conflicts, yellow for other states needing attention, and uncolored when current. Selection remains highlighted, including when `NO_COLOR` is set.
 
+Press `d` in the repository view to hide the selected repository from Autopull. Confirm with `y`, or cancel with another key. Its directory, files, and group membership are kept. Hidden directories and their descendants are skipped by scans and fetches and blocked from pulls, including explicit CLI pulls.
+
+Press `h` to manage hidden directories: Enter restores the selected directory, `e` edits its exclusion path, and `n` adds another directory to exclude. Escape returns to the repository list. Exclusions persist across restarts in `~/.config/autopull/exclusions.json`, or the file named by `AUTOPULL_EXCLUSIONS_FILE`. You can also edit this JSON directly; changes take effect on the next scan or fetch, and pulls check it again before proceeding. Remove a path from `directories` to restore it:
+
+```json
+{
+  "version": 1,
+  "directories": ["/home/you/Repos/example"]
+}
+```
+
 Press `x` to fix the selected repository with an interactive coding agent. Autopull checks PATH for Codex, Claude Code, AGY, Copilot, Kiro CLI, OpenCode, Aider, Gemini CLI, Qwen Code, Amp, Cursor Agent, Droid, and Pi, and lists the installed tools. Use `j`/`k` or the arrows to select one, Enter to open it, or Escape to cancel. Kiro starts with `kiro-cli chat`; the other tools start with their default interactive command. You enter your own instructions in the agent session.
 
 Choose “Other CLI…” to launch another executable, optionally with arguments, such as `my-agent chat`. Quote paths or arguments containing spaces. Commands run directly without shell expansion. The tool opens in the selected repository using its normal permissions. When it exits, Autopull restores the terminal dashboard and rescans the current roots.

@@ -30,6 +30,7 @@ const harness = async (t, services = {}, repositories = [repository("one"), repo
         discoverRepositories: async () => ({ repositories: repositories.map((repo) => repo.path), errors: [] }),
         inspectMany: async () => { scans += 1; return repositories; },
         loadGroups: async () => [],
+        loadExclusions: async () => [],
         discoverCodingAgents: async () => [agent],
         ...services,
     });

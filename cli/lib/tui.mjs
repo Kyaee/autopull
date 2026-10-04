@@ -4,6 +4,7 @@ import { access, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { discoverCodingAgents, launchCodingAgent, resolveCodingAgent } from "./agents.mjs";
+import { canonicalDirectory, isDirectoryExcluded, loadExclusions, saveExclusions } from "./exclusions.mjs";
 import { discoverRepositories } from "./discovery.mjs";
 import { pullRepository } from "./git.mjs";
 import {
@@ -37,7 +38,7 @@ const paintLine = (line, color) => {
         .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
         .replace(/\bCURRENT\b/g, "\u001b[32m$&\u001b[0m")
         .replace(/(█+|░+)/gu, "\u001b[36m$1\u001b[0m")
-        .replace(/(↑↓ jk|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedox])(?= (?:move|scan|fetch|fix|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open))/gu,
+        .replace(/(↑↓ jk|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxh])(?= (?:move|scan|fetch|fix|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add))/gu,
             "\u001b[1;36m$1\u001b[0m");
 };
 
@@ -284,9 +285,18 @@ export const renderTui = (model, terminal = {}) => {
         } else if (model.modal?.kind === "input") {
             compact = [model.modal.heading ?? "group / name", ...wrapText(model.modal.title, width).slice(0, rows - 4),
                 `> ${model.modal.value}_`];
+        } else if (model.modal?.kind === "confirm") {
+            compact = ["Confirm", ...wrapText(model.modal.title, width).slice(0, rows - 2)];
+        } else if (model.view === "exclusions") {
+            const directories = model.excludedDirectories ?? [];
+            const visible = viewport(directories, model.excludedIndex ?? 0, rows - 3);
+            compact = ["Hidden directories", "Enter restore e edit",
+                ...visible.items.map((path, index) => `${visible.offset + index === model.excludedIndex ? "›" : " "} ${path}`)];
         }
         while (compact.length < rows - 1) compact.push("");
-        compact.push(model.modal ? "Enter open Esc cancel" : "↑↓ jk move  q quit");
+        compact.push(model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
+            ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : model.modal.kind === "agents" || model.modal.heading === "coding CLI" ? "open" : "save")} Esc cancel`
+            : model.view === "exclusions" ? "Esc back q quit" : "↑↓ jk move  q quit");
         return compact.map((line) => paintContent(line, width, terminal)).join("\n");
     }
     const lines = panel(`autopull / ${model.roots.join(":")}`, overview, width, 5, terminal);
@@ -313,6 +323,12 @@ export const renderTui = (model, terminal = {}) => {
         content = [...wrapText(model.modal.title, width - 4), "",
             model.modal.kind === "input" ? `> ${model.modal.value}_` : "Press y to confirm or any other key to cancel.",
             model.modal.kind === "input" ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : "save")}  Esc cancel` : ""];
+    } else if (model.view === "exclusions") {
+        title = "Hidden directories / editable exclusions";
+        const directories = model.excludedDirectories ?? [];
+        const visible = viewport(directories, model.excludedIndex ?? 0, Math.max(1, bodyHeight - 2));
+        content = visible.items.map((path, index) => `${visible.offset + index === model.excludedIndex ? "›" : " "} ${path}`);
+        if (!content.length) content.push("No hidden directories. Press n to add one.");
     } else if (model.view === "groups") {
         title = "Repository groups";
         const entries = [{ name: "All repositories", repositories: model.allRepositories.map((repository) => repository.path) }, ...model.groups];
@@ -352,20 +368,22 @@ export const renderTui = (model, terminal = {}) => {
     if (model.modal || model.view !== "repositories") {
         lines.push(...panel(title, content, width, bodyHeight, terminal, accent));
     }
-    let controls = "↑↓ jk move  s scan  f fetch  p pull  x fix  g groups  o root  q quit";
-    if (model.activeGroup) controls = "↑↓ jk move  s scan  f fetch  p pull  x fix  a group  g groups  o root  q quit";
+    let controls = "↑↓ jk move s scan f fetch p pull x fix d hide h hidden g groups o root q quit";
+    if (model.activeGroup) controls = "↑↓ jk move s scan f fetch p pull x fix d hide h hidden a group g groups o root q quit";
     if (model.view === "groups") controls = "↑↓ jk move  Enter use  n new  e members  r rename  d delete  Esc back";
     if (model.view === "members") controls = "↑↓ jk move  Space toggle membership  Enter/Esc done";
-    if (width < 80 && model.view === "repositories") controls = model.activeGroup
-        ? "↑↓ jk move p pull x fix a group g groups o root q quit"
-        : "↑↓ jk move f fetch p pull x fix g groups o root q quit";
+    if (width < 90 && model.view === "repositories") controls = "↑↓ jk move f fetch p pull x fix d hide h hidden o root q quit";
+    if (width < 70 && model.view === "repositories") controls = "↑↓ jk move p pull x fix d hide h hidden o root q quit";
+    if (model.view === "exclusions") controls = "↑↓ jk Enter restore e edit n add Esc back q quit";
     if (model.modal) controls = model.modal.kind === "agents" ? "↑↓ jk move  Enter open  Esc cancel"
         : model.modal.kind === "input" ? model.modal.heading === "coding CLI"
         ? "Type a CLI command  Enter open  Esc cancel"
         : model.modal.heading === "root folder"
         ? "Type a folder path  Enter scan  Esc cancel"
+        : model.modal.heading === "excluded directory"
+        ? "Type a folder path  Enter save  Esc cancel"
         : "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
-    if (width < 40) controls = model.modal ? "Enter open Esc" : "↑↓ move  q quit";
+    if (width < 40) controls = model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "↑↓ move  q quit";
     lines.push(...panel("controls", [controls], width, 3, terminal));
     return lines.slice(0, rows).join("\n");
 };
@@ -380,6 +398,7 @@ export const tuiActionForKey = (key = {}) => {
     if (key.name === "f" || key.name === "r") return "fetch";
     if (key.name === "o") return "root";
     if (key.name === "x") return "fix";
+    if (key.name === "h") return "exclusions";
     if (key.name === "p") return "pull";
     if (key.name === "a") return "pull-group";
     if (key.name === "g") return "groups";
@@ -408,6 +427,8 @@ export const runTui = async (options, io = process, services = {}) => {
     const findAgents = services.discoverCodingAgents ?? discoverCodingAgents;
     const resolveAgent = services.resolveCodingAgent ?? resolveCodingAgent;
     const launchAgent = services.launchCodingAgent ?? launchCodingAgent;
+    const readExclusions = services.loadExclusions ?? loadExclusions;
+    const writeExclusions = services.saveExclusions ?? saveExclusions;
     let active = true;
     let suspended = false;
     let animationTimer = null;
@@ -423,6 +444,8 @@ export const runTui = async (options, io = process, services = {}) => {
         groupIndex: 0,
         editingGroup: null,
         memberIndex: 0,
+        excludedDirectories: [],
+        excludedIndex: 0,
         view: "repositories",
         modal: null,
         busy: false,
@@ -451,7 +474,9 @@ export const runTui = async (options, io = process, services = {}) => {
         if (model.activeGroup && !model.groups.some((group) => group.name === model.activeGroup)) {
             model.activeGroup = null;
         }
-        model.repositories = repositoriesInGroup(model.allRepositories, model.groups, model.activeGroup);
+        const included = model.allRepositories.filter((repository) => !isDirectoryExcluded(repository.path, model.excludedDirectories));
+        model.repositories = repositoriesInGroup(included, model.groups, model.activeGroup);
+        model.excludedIndex = Math.max(0, Math.min(model.excludedIndex, model.excludedDirectories.length - 1));
         const nextIndex = selectedPath
             ? model.repositories.findIndex((repository) => repository.path === selectedPath)
             : -1;
@@ -520,7 +545,10 @@ export const runTui = async (options, io = process, services = {}) => {
                 model.discoveryErrors = [];
                 draw();
             }
-            const discovery = await discover(model.roots, { maxDepth: options.maxDepth });
+            model.excludedDirectories = await readExclusions(options.exclusionsPath);
+            applyGroupFilter();
+            const discovery = await discover(model.roots, { maxDepth: options.maxDepth, excludedDirectories: model.excludedDirectories });
+            const includedPaths = discovery.repositories.filter((path) => !isDirectoryExcluded(path, model.excludedDirectories));
             let groupWarning = "";
             try {
                 model.groups = await readGroups(options.groupsPath);
@@ -528,14 +556,14 @@ export const runTui = async (options, io = process, services = {}) => {
                 groupWarning = `Cannot read groups: ${error instanceof Error ? error.message : String(error)}`;
             }
             if (fetchRemotes) {
-                const results = await fetch(discovery.repositories);
+                const results = await fetch(includedPaths);
                 model.allRepositories = results.map((result) => result.repository);
                 const failures = results.filter((result) => !result.ok).length;
                 model.notification = failures > 0
                     ? `Fetch finished with ${failures} failure${failures === 1 ? "" : "s"}.`
                     : "Remote state fetched.";
             } else {
-                model.allRepositories = await inspect(discovery.repositories);
+                model.allRepositories = await inspect(includedPaths);
                 model.notification = `Scanned ${model.allRepositories.length} repositor${model.allRepositories.length === 1 ? "y" : "ies"}.`;
             }
             model.discoveryErrors = discovery.errors;
@@ -573,7 +601,7 @@ export const runTui = async (options, io = process, services = {}) => {
         model.notification = "";
         draw();
         try {
-            const result = await pull(selected.path);
+            const result = await pull(selected.path, { exclusionsPath: options.exclusionsPath });
             replaceRepository(result.repository);
             model.notification = `${result.ok ? "Updated" : result.blocked ? "Blocked" : "Failed"}: ${result.message}`;
         } catch (error) {
@@ -591,7 +619,9 @@ export const runTui = async (options, io = process, services = {}) => {
         model.activity = `Pulling ${model.activeGroup}`;
         draw();
         try {
-            const outcome = await pullGroup(model.repositories);
+            const outcome = await pullGroup(model.repositories, {
+                pullRepository: (path) => pull(path, { exclusionsPath: options.exclusionsPath }),
+            });
             for (const result of outcome.results) replaceRepository(result.repository);
             model.notification = `Group pull: ${outcome.updated} updated, ${outcome.blocked} blocked, ${outcome.failed} failed.`;
         } catch (error) {
@@ -616,6 +646,80 @@ export const runTui = async (options, io = process, services = {}) => {
         model.modal = { kind: "input", title, value, submit };
         model.notification = "";
         draw();
+    };
+
+    const changeExclusions = async (change, message) => {
+        model.busy = true;
+        model.activity = "Saving excluded directories";
+        draw();
+        try {
+            const latest = await readExclusions(options.exclusionsPath);
+            model.excludedDirectories = await writeExclusions(await change(latest), options.exclusionsPath);
+            applyGroupFilter();
+            await load(false);
+            model.notification = `${message} ${model.notification}`;
+        } catch (error) {
+            model.notification = `Cannot save excluded directories: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+            model.busy = false;
+            model.activity = "";
+            draw();
+        }
+    };
+
+    const hideSelectedRepository = () => {
+        const repository = model.repositories[model.selectedIndex];
+        if (!repository) {
+            model.notification = "Select a repository to hide.";
+            draw();
+            return;
+        }
+        model.modal = {
+            kind: "confirm",
+            title: `Hide ${repository.path} from Autopull? Its directory and files stay on disk. Press h later to edit or restore it.`,
+            submit: () => changeExclusions((directories) => [...directories, repository.path], `${repository.name} hidden. Press h to restore it.`),
+        };
+        draw();
+    };
+
+    const openExclusions = async () => {
+        model.busy = true;
+        model.activity = "Loading hidden directories";
+        model.notification = "";
+        draw();
+        try {
+            model.excludedDirectories = await readExclusions(options.exclusionsPath);
+            if (!active) return;
+            applyGroupFilter();
+            model.view = "exclusions";
+        } catch (error) {
+            model.notification = error instanceof Error ? error.message : String(error);
+        } finally {
+            model.busy = false;
+            model.activity = "";
+            draw();
+        }
+    };
+
+    const editExcludedDirectory = (adding = false) => {
+        const previous = adding ? null : model.excludedDirectories[model.excludedIndex];
+        if (!adding && !previous) return;
+        model.modal = {
+            kind: "input", heading: "excluded directory", value: previous ?? "",
+            title: "Enter a directory to hide from Autopull, including its repositories. Paths can be absolute, relative, or ~/path. Files stay on disk.",
+            submit: (value) => changeExclusions(async (directories) => {
+                const path = await canonicalDirectory(value);
+                if (previous && !directories.includes(previous)) throw new Error("This exclusion changed. Reopen the hidden directories list before editing it.");
+                return previous ? directories.map((current) => current === previous ? path : current) : [...directories, path];
+            }, "Excluded directory saved."),
+        };
+        draw();
+    };
+
+    const restoreExcludedDirectory = () => {
+        const path = model.excludedDirectories[model.excludedIndex];
+        if (!path) return;
+        void changeExclusions((directories) => directories.filter((directory) => directory !== path), `Exclusion removed: ${path}.`);
     };
 
     const changeRootFolder = () => {
@@ -876,10 +980,11 @@ export const runTui = async (options, io = process, services = {}) => {
         const moveSelection = (direction) => {
             const indexKey = model.view === "groups"
                 ? "groupIndex"
-                : model.view === "members" ? "memberIndex" : "selectedIndex";
+                : model.view === "members" ? "memberIndex" : model.view === "exclusions" ? "excludedIndex" : "selectedIndex";
             const length = model.view === "groups"
                 ? model.groups.length + 1
-                : model.view === "members" ? model.allRepositories.length : model.repositories.length;
+                : model.view === "members" ? model.allRepositories.length
+                    : model.view === "exclusions" ? model.excludedDirectories.length : model.repositories.length;
             model[indexKey] = Math.max(0, Math.min(length - 1, model[indexKey] + direction));
             model.notification = "";
             draw();
@@ -899,13 +1004,21 @@ export const runTui = async (options, io = process, services = {}) => {
                 moveSelection(1);
             } else if (action === "back") {
                 if (model.view === "members") model.view = "groups";
-                else if (model.view === "groups") model.view = "repositories";
+                else if (model.view === "groups" || model.view === "exclusions") model.view = "repositories";
                 else {
                     finish();
                     return;
                 }
                 model.notification = "";
                 draw();
+            } else if (action === "exclusions") {
+                void openExclusions();
+            } else if (model.view === "exclusions" && (action === "enter" || action === "fetch" && key.name === "r")) {
+                restoreExcludedDirectory();
+            } else if (model.view === "exclusions" && action === "edit") {
+                editExcludedDirectory();
+            } else if (model.view === "exclusions" && action === "new") {
+                editExcludedDirectory(true);
             } else if (model.view === "groups" && action === "new") {
                 createRepositoryGroup();
             } else if (model.view === "groups" && action === "edit") {
@@ -936,6 +1049,8 @@ export const runTui = async (options, io = process, services = {}) => {
                 changeRootFolder();
             } else if (action === "fix") {
                 void openFixPicker();
+            } else if (action === "delete") {
+                hideSelectedRepository();
             } else if (action === "pull") {
                 void pullSelected();
             } else if (action === "pull-group") {

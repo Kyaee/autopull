@@ -140,6 +140,7 @@ for (const outcome of ["success", "failure", "quit"]) {
             discoverRepositories: async () => ({ repositories: ["/work/example"], errors: [] }),
             inspectMany: async () => [repository()],
             loadGroups: async () => [],
+            loadExclusions: async () => [],
             refreshMany: () => { refreshCalls += 1; return pending.promise; },
         });
         t.after(() => input.emit("keypress", "q", { name: "q" }));
