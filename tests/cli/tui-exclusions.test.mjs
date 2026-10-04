@@ -41,34 +41,35 @@ const harness = async (t, storage) => {
         pullMany: async (entries) => { pulledGroups.push(entries.map((repository) => repository.path)); return { results: [], updated: 1, blocked: 0, failed: 0 }; },
     });
     const key = (name, text = "") => input.emit("keypress", text, { name });
+    const command = (name) => { input.emit("keypress", "\u0001", { name: "a", ctrl: true }); key(name); };
     t.after(() => { key("escape"); key("q"); });
     await waitFor(() => /Scanned/.test(frames.at(-1)));
-    return { key, frames, running, fetched, pulledGroups };
+    return { key, command, frames, running, fetched, pulledGroups };
 };
 
 test("hides repositories persistently, preserves group membership, skips fetch and group pull, and restores", async (t) => {
     const storage = { directories: [] };
     const ui = await harness(t, storage);
-    ui.key("g"); ui.key("down"); ui.key("return");
-    ui.key("d");
+    ui.command("g"); ui.key("down"); ui.key("return");
+    ui.command("d");
     assert.match(ui.frames.at(-1), /directory and files stay on disk/);
     ui.key("n");
     assert.deepEqual(storage.directories, []);
-    ui.key("d"); ui.key("y");
+    ui.command("d"); ui.key("y");
     await waitFor(() => /one hidden/.test(ui.frames.at(-1)));
     assert.deepEqual(storage.directories, ["/work/one"]);
     assert.doesNotMatch(ui.frames.at(-1), /›.*one/);
     ui.key("f");
     await waitFor(() => /Remote state fetched/.test(ui.frames.at(-1)));
     assert.deepEqual(ui.fetched, [["/work/two"]]);
-    ui.key("a"); ui.key("y");
+    ui.command("a"); ui.key("y");
     await waitFor(() => /Group pull:/.test(ui.frames.at(-1)));
     assert.deepEqual(ui.pulledGroups, [["/work/two"]]);
     ui.key("q"); await ui.running;
 
     const restarted = await harness(t, storage);
     assert.doesNotMatch(restarted.frames.at(-1), /›.*one/);
-    restarted.key("h");
+    restarted.command("h");
     await waitFor(() => /Hidden directories/.test(restarted.frames.at(-1)));
     assert.match(restarted.frames.at(-1), /› \/work\/one/);
     restarted.key("e");
@@ -78,7 +79,7 @@ test("hides repositories persistently, preserves group membership, skips fetch a
     assert.deepEqual(storage.directories, ["/work"]);
     restarted.key("escape");
     assert.match(restarted.frames.at(-1), /AUTOPULL  0 repos/);
-    restarted.key("h");
+    restarted.command("h");
     await waitFor(() => /Hidden directories/.test(restarted.frames.at(-1)));
     restarted.key("return");
     await waitFor(() => /Exclusion removed:/.test(restarted.frames.at(-1)));
@@ -91,7 +92,7 @@ test("hides repositories persistently, preserves group membership, skips fetch a
 test("failed saves leave the repository visible and exclusions unchanged", async (t) => {
     const storage = { directories: [], fail: true };
     const ui = await harness(t, storage);
-    ui.key("d"); ui.key("y");
+    ui.command("d"); ui.key("y");
     await waitFor(() => /Cannot save excluded directories/.test(ui.frames.at(-1)));
     assert.deepEqual(storage.directories, []);
     assert.match(ui.frames.at(-1), /›.*one/);

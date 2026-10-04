@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 import { discoverCodingAgents, launchCodingAgent, resolveCodingAgent } from "./agents.mjs";
 import { canonicalDirectory, isDirectoryExcluded, loadExclusions, saveExclusions } from "./exclusions.mjs";
 import { discoverRepositories } from "./discovery.mjs";
+import { stashRepositoryChanges } from "./stash.mjs";
 import { pullRepository } from "./git.mjs";
 import {
     createGroup,
@@ -23,6 +24,33 @@ const LEAVE_ALTERNATE_SCREEN = "\u001b[?25h\u001b[?1049l";
 const CLEAR_SCREEN = "\u001b[2J\u001b[H";
 const ANSI_RESET = "\u001b[0m";
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const PREFIX_ACTIONS = new Set(["scan", "root", "fix", "stash", "delete", "exclusions", "groups", "pull-group", "select-all", "clear-selection"]);
+const prefixCommands = (model) => [
+    ["s", "scan"], ["x", "fix"], ["z", "stash"], ["d", "hide"],
+    ["h", "hidden"], ["g", "groups"], ["o", "root"],
+    ...(model.activeGroup ? [["a", "group pull"]] : []),
+    ["v", "all"], ["c", "clear"],
+];
+
+const commandBar = (model, width, terminal) => {
+    if (!model.prefixArmed || model.modal || model.view !== "repositories") return [];
+    const entries = ["Ctrl+A", ...prefixCommands(model).map(([key, label]) => `${key} ${label}`), "Esc cancel"];
+    const lines = [];
+    let line = "";
+    for (const entry of entries) {
+        if (line && line.length + entry.length + 2 > width) {
+            lines.push(line);
+            line = "";
+        }
+        line = line ? `${line}  ${entry}` : entry;
+    }
+    if (line) lines.push(line);
+    return lines.map((value) => {
+        const text = fit(value, width);
+        return terminal.color ? `\u001b[1;97;44m${text}${ANSI_RESET}`
+            : terminal.style ? `\u001b[1m${text}${ANSI_RESET}` : text;
+    });
+};
 
 const paintLine = (line, color) => {
     if (line.startsWith("›")) return `\u001b[1;7m${line}${ANSI_RESET}`;
@@ -38,7 +66,7 @@ const paintLine = (line, color) => {
         .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
         .replace(/\bCURRENT\b/g, "\u001b[32m$&\u001b[0m")
         .replace(/(█+|░+)/gu, "\u001b[36m$1\u001b[0m")
-        .replace(/(↑↓ jk|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxh])(?= (?:move|scan|fetch|fix|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add))/gu,
+        .replace(/(↑↓ jk|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxhz])(?= (?:move|scan|fetch|fix|stash|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add))/gu,
             "\u001b[1;36m$1\u001b[0m");
 };
 
@@ -150,6 +178,19 @@ const repositoryRow = (repository, selected, width) => {
     ].join(" "), nameStart: 2, nameLength: name.trimEnd().length, nameColor, selected };
 };
 
+const selectionHeader = (model, width) => model.markedPaths?.length
+    ? `      ${repositoryHeader(width - 4).slice(2)}` : repositoryHeader(width);
+
+const selectionRow = (model, repository, selected, width) => {
+    const marking = model.markedPaths?.length > 0;
+    const row = repositoryRow(repository, selected, width - (marking ? 4 : 0));
+    if (marking) {
+        row.text = `${row.text.slice(0, 2)}[${model.markedPaths.includes(repository.path) ? "x" : " "}] ${row.text.slice(2)}`;
+        row.nameStart += 4;
+    }
+    return row;
+};
+
 const paintContent = (value, width, terminal) => {
     const row = typeof value === "object" ? value : null;
     const line = fit(row ? row.text : value, width);
@@ -166,7 +207,7 @@ const paintContent = (value, width, terminal) => {
 };
 
 const actionLabel = (repository) => {
-    if (!repository.canPull) return `Blocked: ${repository.blockers.join("; ")}. Press x to fix`;
+    if (!repository.canPull) return `Blocked: ${repository.blockers.join("; ")}. Press Ctrl+A then x to fix`;
     if (repository.needsPull) return "Ready to fast-forward. Press p to pull";
     return "No update is waiting";
 };
@@ -259,7 +300,8 @@ export const renderTui = (model, terminal = {}) => {
     const rows = Math.max(8, terminal.rows ?? 30);
     const summary = model.summary ?? summarize(model.repositories);
     const scope = model.activeGroup ?? "All repositories";
-    const overview = [`AUTOPULL  ${summary.total} repos  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted`];
+    const selection = model.markedPaths?.length ? `  ${model.markedPaths.length} selected` : "";
+    const overview = [`AUTOPULL  ${summary.total} repos${selection}  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted`];
     if (width >= 76) {
         const cell = Math.floor((width - 10) / 3);
         overview.push([
@@ -274,10 +316,14 @@ export const renderTui = (model, terminal = {}) => {
     const status = model.busy ? `${SPINNER_FRAMES[(model.spinnerFrame ?? 0) % SPINNER_FRAMES.length]} ${model.activity}…` : model.notification ? `STATUS  ${model.notification}`
         : warning ? `Warning  ${warning.path}: ${warning.message}` : `SCOPE   ${scope}  ${model.roots.join(":")}`;
     overview.push(status);
-    if (rows < 12) {
+    const additionalControls = commandBar(model, width, terminal);
+    const layoutRows = rows - additionalControls.length;
+    if (layoutRows < 12) {
         const selected = model.repositories[model.selectedIndex];
-        let compact = [overview[0], status, repositoryHeader(width),
-            selected ? repositoryRow(selected, true, width) : "No repositories found."];
+        const selectedLine = selected ? selectionRow(model, selected, true, width) : "No repositories found.";
+        let compact = [overview[0], status, selectionHeader(model, width),
+            selectedLine];
+        if (layoutRows < 5) compact = layoutRows < 3 ? [selectedLine] : [overview[0], selectedLine];
         if (model.modal?.kind === "agents") {
             const visible = viewport(model.modal.agents, model.modal.selectedIndex, rows - 3);
             compact = [`Fix ${model.modal.repository.name}`, "Choose a coding CLI",
@@ -286,21 +332,22 @@ export const renderTui = (model, terminal = {}) => {
             compact = [model.modal.heading ?? "group / name", ...wrapText(model.modal.title, width).slice(0, rows - 4),
                 `> ${model.modal.value}_`];
         } else if (model.modal?.kind === "confirm") {
-            compact = ["Confirm", ...wrapText(model.modal.title, width).slice(0, rows - 2)];
+            compact = ["Confirm", ...wrapText(model.modal.compactTitle ?? model.modal.title, width).slice(0, rows - 2)];
         } else if (model.view === "exclusions") {
             const directories = model.excludedDirectories ?? [];
             const visible = viewport(directories, model.excludedIndex ?? 0, rows - 3);
             compact = ["Hidden directories", "Enter restore e edit",
                 ...visible.items.map((path, index) => `${visible.offset + index === model.excludedIndex ? "›" : " "} ${path}`)];
         }
-        while (compact.length < rows - 1) compact.push("");
-        compact.push(model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
+        while (compact.length < layoutRows - 1) compact.push("");
+        const controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
             ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : model.modal.kind === "agents" || model.modal.heading === "coding CLI" ? "open" : "save")} Esc cancel`
-            : model.view === "exclusions" ? "Esc back q quit" : "↑↓ jk move  q quit");
-        return compact.map((line) => paintContent(line, width, terminal)).join("\n");
+            : model.view === "exclusions" ? "Esc back q quit" : width < 40 ? "Ctrl+A more q quit" : "↑↓ jk move Space mark Ctrl+A more q quit";
+        return [...compact.map((line) => paintContent(line, width, terminal)), ...additionalControls,
+            paintContent(controls, width, terminal)].join("\n");
     }
     const lines = panel(`autopull / ${model.roots.join(":")}`, overview, width, 5, terminal);
-    const bodyHeight = rows - 8;
+    const bodyHeight = layoutRows - 8;
     const sideBySide = width >= 120 && bodyHeight >= DETAIL_ROWS && model.repositories.length > 0;
     const selected = model.repositories[model.selectedIndex];
     let content = [];
@@ -320,7 +367,7 @@ export const renderTui = (model, terminal = {}) => {
     } else if (model.modal) {
         title = model.modal.kind === "input" ? model.modal.heading ?? "group / name" : "confirmation";
         accent = 33;
-        content = [...wrapText(model.modal.title, width - 4), "",
+        content = [...wrapText(bodyHeight < 10 ? model.modal.compactTitle ?? model.modal.title : model.modal.title, width - 4), "",
             model.modal.kind === "input" ? `> ${model.modal.value}_` : "Press y to confirm or any other key to cancel.",
             model.modal.kind === "input" ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : "save")}  Esc cancel` : ""];
     } else if (model.view === "exclusions") {
@@ -350,11 +397,11 @@ export const renderTui = (model, terminal = {}) => {
         const listHeight = sideBySide || !showDetails ? bodyHeight : bodyHeight - DETAIL_ROWS;
         const visible = viewport(model.repositories, model.selectedIndex, Math.max(1, listHeight - 3));
         title = `repositories / ${scope} / ${model.repositories.length ? `${visible.offset + 1}–${visible.offset + visible.items.length}` : "0"} of ${model.repositories.length}`;
-        content = [repositoryHeader(listWidth - 4), ...visible.items.map((repository, index) =>
-            repositoryRow(repository, visible.offset + index === model.selectedIndex, listWidth - 4))];
+        content = [selectionHeader(model, listWidth - 4), ...visible.items.map((repository, index) =>
+            selectionRow(model, repository, visible.offset + index === model.selectedIndex, listWidth - 4))];
         if (!model.repositories.length) content = [...wrapText(model.busy ? "Scanning for Git repositories…" : model.activeGroup
-            ? `No scanned repositories belong to ${scope}. Press g to edit membership.`
-            : "No Git repositories found. Press s to scan again.", listWidth - 4)];
+            ? `No scanned repositories belong to ${scope}. Press Ctrl+A then g to edit membership.`
+            : "No Git repositories found. Press Ctrl+A then s to scan again.", listWidth - 4)];
         const list = panel(title, content, listWidth, listHeight, terminal);
         if (sideBySide && selected) {
             const detailWidth = width - listWidth - 1;
@@ -368,12 +415,9 @@ export const renderTui = (model, terminal = {}) => {
     if (model.modal || model.view !== "repositories") {
         lines.push(...panel(title, content, width, bodyHeight, terminal, accent));
     }
-    let controls = "↑↓ jk move s scan f fetch p pull x fix d hide h hidden g groups o root q quit";
-    if (model.activeGroup) controls = "↑↓ jk move s scan f fetch p pull x fix d hide h hidden a group g groups o root q quit";
+    let controls = "↑↓ jk move Space mark f fetch p pull Ctrl+A more q quit";
     if (model.view === "groups") controls = "↑↓ jk move  Enter use  n new  e members  r rename  d delete  Esc back";
     if (model.view === "members") controls = "↑↓ jk move  Space toggle membership  Enter/Esc done";
-    if (width < 90 && model.view === "repositories") controls = "↑↓ jk move f fetch p pull x fix d hide h hidden o root q quit";
-    if (width < 70 && model.view === "repositories") controls = "↑↓ jk move p pull x fix d hide h hidden o root q quit";
     if (model.view === "exclusions") controls = "↑↓ jk Enter restore e edit n add Esc back q quit";
     if (model.modal) controls = model.modal.kind === "agents" ? "↑↓ jk move  Enter open  Esc cancel"
         : model.modal.kind === "input" ? model.modal.heading === "coding CLI"
@@ -383,13 +427,16 @@ export const renderTui = (model, terminal = {}) => {
         : model.modal.heading === "excluded directory"
         ? "Type a folder path  Enter save  Esc cancel"
         : "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
-    if (width < 40) controls = model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "↑↓ move  q quit";
+    if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
+    lines.push(...additionalControls);
     lines.push(...panel("controls", [controls], width, 3, terminal));
     return lines.slice(0, rows).join("\n");
 };
 
 export const tuiActionForKey = (key = {}) => {
     if (key.ctrl && key.name === "c") return "quit";
+    if (key.ctrl && key.name === "a") return "prefix";
+    if (key.ctrl || key.meta) return null;
     if (key.name === "q") return "quit";
     if (key.name === "escape") return "back";
     if (key.name === "up" || key.name === "j") return "up";
@@ -398,6 +445,9 @@ export const tuiActionForKey = (key = {}) => {
     if (key.name === "f" || key.name === "r") return "fetch";
     if (key.name === "o") return "root";
     if (key.name === "x") return "fix";
+    if (key.name === "v") return "select-all";
+    if (key.name === "c") return "clear-selection";
+    if (key.name === "z") return "stash";
     if (key.name === "h") return "exclusions";
     if (key.name === "p") return "pull";
     if (key.name === "a") return "pull-group";
@@ -421,6 +471,7 @@ export const runTui = async (options, io = process, services = {}) => {
     const inspect = services.inspectMany ?? inspectMany;
     const fetch = services.refreshMany ?? refreshMany;
     const pull = services.pullRepository ?? pullRepository;
+    const stashChanges = services.stashRepositoryChanges ?? stashRepositoryChanges;
     const pullGroup = services.pullMany ?? pullMany;
     const readGroups = services.loadGroups ?? loadGroups;
     const writeGroups = services.saveGroups ?? saveGroups;
@@ -439,6 +490,7 @@ export const runTui = async (options, io = process, services = {}) => {
         summary: summarize([]),
         discoveryErrors: [],
         selectedIndex: 0,
+        markedPaths: [],
         groups: [],
         activeGroup: null,
         groupIndex: 0,
@@ -448,6 +500,7 @@ export const runTui = async (options, io = process, services = {}) => {
         excludedIndex: 0,
         view: "repositories",
         modal: null,
+        prefixArmed: false,
         busy: false,
         activity: "",
         spinnerFrame: 0,
@@ -476,6 +529,8 @@ export const runTui = async (options, io = process, services = {}) => {
         }
         const included = model.allRepositories.filter((repository) => !isDirectoryExcluded(repository.path, model.excludedDirectories));
         model.repositories = repositoriesInGroup(included, model.groups, model.activeGroup);
+        const visiblePaths = new Set(model.repositories.map((repository) => repository.path));
+        model.markedPaths = model.markedPaths.filter((path) => visiblePaths.has(path));
         model.excludedIndex = Math.max(0, Math.min(model.excludedIndex, model.excludedDirectories.length - 1));
         const nextIndex = selectedPath
             ? model.repositories.findIndex((repository) => repository.path === selectedPath)
@@ -539,6 +594,7 @@ export const runTui = async (options, io = process, services = {}) => {
                 }
                 model.activeGroup = null;
                 model.selectedIndex = 0;
+                model.markedPaths = [];
                 model.allRepositories = [];
                 model.repositories = [];
                 model.summary = summarize([]);
@@ -578,7 +634,50 @@ export const runTui = async (options, io = process, services = {}) => {
         }
     };
 
+    const markedRepositories = () => model.repositories.filter((repository) => model.markedPaths.includes(repository.path));
+    const actionRepositories = () => model.markedPaths.length ? markedRepositories()
+        : model.repositories[model.selectedIndex] ? [model.repositories[model.selectedIndex]] : [];
+
+    const fetchMarked = async () => {
+        model.busy = true;
+        model.activity = "Fetching marked repositories";
+        model.notification = "";
+        draw();
+        try {
+            model.excludedDirectories = await readExclusions(options.exclusionsPath);
+            applyGroupFilter();
+            const targets = markedRepositories();
+            const results = await fetch(targets.map((repository) => repository.path));
+            for (const result of results) replaceRepository(result.repository);
+            const failed = results.filter((result) => !result.ok).length;
+            model.notification = `Selection fetch: ${results.length - failed} fetched, ${failed} failed.`;
+        } catch (error) {
+            model.notification = `Fetch failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+            model.busy = false;
+            model.activity = "";
+            draw();
+        }
+    };
+
     const pullSelected = async () => {
+        if (model.markedPaths.length) {
+            const targets = markedRepositories();
+            const waiting = targets.filter((repository) => repository.needsPull).length;
+            if (!waiting) {
+                model.notification = "Marked repositories have no waiting updates.";
+                draw();
+                return;
+            }
+            model.modal = {
+                kind: "confirm",
+                compactTitle: `Pull ${waiting} waiting updates in ${targets.length} marked repositories? Continue?`,
+                title: `Pull ${waiting} waiting updates in ${targets.length} marked repositories? ${targets.map((repository) => repository.name).join(", ")}. Each repository is checked before a fast-forward pull. Do you want to continue?`,
+                submit: () => pullTargets(targets, "Selection pull"),
+            };
+            draw();
+            return;
+        }
         const selected = model.repositories[model.selectedIndex];
         if (!selected) {
             model.notification = "There is no repository to pull.";
@@ -613,25 +712,98 @@ export const runTui = async (options, io = process, services = {}) => {
         }
     };
 
-    const pullActiveGroup = async () => {
-        if (!model.activeGroup) return;
+    const stashMarked = async (targets) => {
         model.busy = true;
-        model.activity = `Pulling ${model.activeGroup}`;
+        model.activity = "Stashing marked repositories";
         draw();
+        let stashed = 0;
+        let blocked = 0;
+        let failed = 0;
         try {
-            const outcome = await pullGroup(model.repositories, {
-                pullRepository: (path) => pull(path, { exclusionsPath: options.exclusionsPath }),
-            });
-            for (const result of outcome.results) replaceRepository(result.repository);
-            model.notification = `Group pull: ${outcome.updated} updated, ${outcome.blocked} blocked, ${outcome.failed} failed.`;
-        } catch (error) {
-            model.notification = `Group pull failed: ${error instanceof Error ? error.message : String(error)}`;
+            for (const repository of targets) {
+                try {
+                    const result = await stashChanges(repository.path, { confirmed: true, exclusionsPath: options.exclusionsPath });
+                    replaceRepository(result.repository);
+                    if (result.ok) stashed += 1;
+                    else if (result.blocked) blocked += 1;
+                    else failed += 1;
+                } catch {
+                    failed += 1;
+                }
+            }
+            model.notification = `Selection stash: ${stashed} stashed, ${blocked} blocked, ${failed} failed. Recover with git stash list in each repository.`;
         } finally {
             model.busy = false;
             model.activity = "";
             draw();
         }
     };
+
+    const confirmStashChanges = () => {
+        if (model.markedPaths.length) {
+            const targets = markedRepositories();
+            model.notification = "";
+            model.modal = {
+                kind: "confirm",
+                compactTitle: `Stash all edits + untracked files in ${targets.length} marked repositories? Continue?`,
+                title: `Stash changes in ${targets.length} marked repositories? ${targets.map((repository) => repository.name).join(", ")}. All staged edits, unstaged edits, and untracked files will be saved in each repository's Git stash and cleared from its working tree. Commits and ignored files stay. Do you want to continue?`,
+                submit: () => stashMarked(targets),
+            };
+            draw();
+            return;
+        }
+        const repository = model.repositories[model.selectedIndex];
+        if (!repository || !repository.dirty || repository.conflicts > 0) {
+            model.notification = !repository ? "Select a repository to stash changes."
+                : repository.conflicts > 0 ? "Resolve conflicts before stashing changes."
+                : "There are no uncommitted changes to stash.";
+            draw();
+            return;
+        }
+        model.notification = "";
+        model.modal = {
+            kind: "confirm",
+            compactTitle: `Stash all edits + untracked files in ${repository.name}? Clears working tree. Continue?`,
+            title: `Stash changes in ${repository.name}? Do you want to continue?\nAll staged edits, unstaged edits, and untracked files will be saved in a Git stash and cleared from the working tree. Commits and ignored files stay.\n${repository.path}`,
+            submit: async () => {
+                model.busy = true;
+                model.activity = `Stashing edits in ${repository.name}`;
+                draw();
+                try {
+                    const result = await stashChanges(repository.path, { confirmed: true, exclusionsPath: options.exclusionsPath });
+                    replaceRepository(result.repository);
+                    model.notification = `${result.ok ? "Stashed" : result.blocked ? "Blocked" : "Failed"}: ${result.message}`;
+                } catch (error) {
+                    model.notification = `Stash failed: ${error instanceof Error ? error.message : String(error)}`;
+                } finally {
+                    model.busy = false;
+                    model.activity = "";
+                    draw();
+                }
+            },
+        };
+        draw();
+    };
+
+    const pullTargets = async (targets, label) => {
+        model.busy = true;
+        model.activity = label;
+        draw();
+        try {
+            const outcome = await pullGroup(targets, {
+                pullRepository: (path) => pull(path, { exclusionsPath: options.exclusionsPath }),
+            });
+            for (const result of outcome.results) replaceRepository(result.repository);
+            model.notification = `${label}: ${outcome.updated} updated, ${outcome.blocked} blocked, ${outcome.failed} failed.`;
+        } catch (error) {
+            model.notification = `${label} failed: ${error instanceof Error ? error.message : String(error)}`;
+        } finally {
+            model.busy = false;
+            model.activity = "";
+            draw();
+        }
+    };
+    const pullActiveGroup = () => pullTargets(model.repositories, "Group pull");
 
     const openGroups = () => {
         model.view = "groups";
@@ -668,16 +840,19 @@ export const runTui = async (options, io = process, services = {}) => {
     };
 
     const hideSelectedRepository = () => {
-        const repository = model.repositories[model.selectedIndex];
-        if (!repository) {
+        const targets = actionRepositories();
+        if (!targets.length) {
             model.notification = "Select a repository to hide.";
             draw();
             return;
         }
+        const repository = targets[0];
         model.modal = {
             kind: "confirm",
-            title: `Hide ${repository.path} from Autopull? Its directory and files stay on disk. Press h later to edit or restore it.`,
-            submit: () => changeExclusions((directories) => [...directories, repository.path], `${repository.name} hidden. Press h to restore it.`),
+            compactTitle: targets.length > 1 ? `Hide ${targets.length} marked repositories? Files stay on disk. Continue?` : undefined,
+            title: targets.length > 1 ? `Hide ${targets.length} marked repositories from Autopull? ${targets.map((repository) => repository.path).join(", ")}. Directories, files, and group membership stay. Do you want to continue?`
+                : `Hide ${repository.path} from Autopull? Its directory and files stay on disk. Press Ctrl+A then h later to edit or restore it.`,
+            submit: () => changeExclusions((directories) => [...directories, ...targets.map((repository) => repository.path)], `${targets.length === 1 ? repository.name : `${targets.length} repositories`} hidden. Press Ctrl+A then h to restore it.`),
         };
         draw();
     };
@@ -998,6 +1173,28 @@ export const runTui = async (options, io = process, services = {}) => {
                 return;
             }
             if (model.busy) return;
+            if (action === "prefix") {
+                if (model.view === "repositories") {
+                    model.prefixArmed = true;
+                    model.notification = "";
+                    draw();
+                }
+                return;
+            }
+            if (model.view === "repositories") {
+                if (model.prefixArmed) {
+                    model.prefixArmed = false;
+                    if (!PREFIX_ACTIONS.has(action)) {
+                        model.notification = action === "back" ? "" : "Command canceled.";
+                        draw();
+                        return;
+                    }
+                } else if (PREFIX_ACTIONS.has(action)) {
+                    model.notification = "Press Ctrl+A first for more commands.";
+                    draw();
+                    return;
+                }
+            }
             if (action === "up") {
                 moveSelection(-1);
             } else if (action === "down") {
@@ -1044,11 +1241,28 @@ export const runTui = async (options, io = process, services = {}) => {
             } else if (action === "scan") {
                 void load(false);
             } else if (action === "fetch") {
-                void load(true);
+                if (model.markedPaths.length) void fetchMarked();
+                else void load(true);
+            } else if (action === "toggle") {
+                const path = model.repositories[model.selectedIndex]?.path;
+                if (path) model.markedPaths = model.markedPaths.includes(path)
+                    ? model.markedPaths.filter((marked) => marked !== path) : [...model.markedPaths, path];
+                model.notification = "";
+                draw();
+            } else if (action === "select-all") {
+                model.markedPaths = model.repositories.map((repository) => repository.path);
+                model.notification = "";
+                draw();
+            } else if (action === "clear-selection") {
+                model.markedPaths = [];
+                model.notification = "";
+                draw();
             } else if (action === "root") {
                 changeRootFolder();
             } else if (action === "fix") {
                 void openFixPicker();
+            } else if (action === "stash") {
+                confirmStashChanges();
             } else if (action === "delete") {
                 hideSelectedRepository();
             } else if (action === "pull") {

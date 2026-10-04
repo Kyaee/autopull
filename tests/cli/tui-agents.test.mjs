@@ -35,9 +35,10 @@ const harness = async (t, services = {}, repositories = [repository("one"), repo
         ...services,
     });
     const key = (name, text = "") => input.emit("keypress", text, { name });
+    const command = (name) => { input.emit("keypress", "\u0001", { name: "a", ctrl: true }); key(name); };
     t.after(() => { key("escape"); key("q"); });
     await settle();
-    return { input, output, frames, key, running, scans: () => scans };
+    return { input, output, frames, key, command, running, scans: () => scans };
 };
 
 for (const outcome of ["success", "nonzero", "signal", "error"]) {
@@ -49,13 +50,13 @@ for (const outcome of ["success", "nonzero", "signal", "error"]) {
             launchCodingAgent: (tool, path) => { launches.push({ tool, path }); return pending.promise; },
         });
         ui.key("k");
-        ui.key("x");
+        ui.command("x");
         await settle();
         assert.match(ui.frames.at(-1), /fix \/ two/);
         assert.match(ui.frames.at(-1), /Codex \(codex\)/);
         ui.key("escape");
         assert.equal(launches.length, 0);
-        ui.key("x");
+        ui.command("x");
         await settle();
         ui.key("return");
         assert.deepEqual(launches, [{ tool: agent, path: "/work/two" }]);
@@ -99,7 +100,7 @@ test("offers a custom command when no coding agents are detected and recovers fr
         launchCodingAgent: async (tool, path) => { launches.push({ tool, path }); return { code: 0, signal: null }; },
     });
     for (const command of ["missing", '"custom CLI" chat']) {
-        ui.key("x");
+        ui.command("x");
         await settle();
         assert.match(ui.frames.at(-1), /› Other CLI/);
         ui.key("return");
@@ -118,7 +119,7 @@ test("offers a custom command when no coding agents are detected and recovers fr
 
 test("does not open an agent without a selected repository", async (t) => {
     const ui = await harness(t, { discoverCodingAgents: () => assert.fail("Should not detect tools without a repository") }, []);
-    ui.key("x");
+    ui.command("x");
     assert.match(ui.frames.at(-1), /Select a repository to fix/);
     ui.key("q");
     await ui.running;
@@ -131,7 +132,7 @@ test("does not launch a custom CLI after quitting while its command is being res
         resolveCodingAgent: () => pending.promise,
         launchCodingAgent: () => assert.fail("Must not launch after quit"),
     });
-    ui.key("x");
+    ui.command("x");
     await settle();
     ui.key("return");
     ui.key(undefined, "custom");

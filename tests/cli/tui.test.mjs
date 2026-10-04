@@ -56,7 +56,8 @@ test("renders repository state, selected details, and TUI controls", () => {
     assert.match(output, /Branch  main  →  origin\/main/);
     assert.match(output, /Ready to fast-forward\. Press p to pull/);
     assert.match(output, /f fetch/);
-    assert.match(output, /o root/);
+    assert.match(output, /Ctrl\+A more/);
+    assert.doesNotMatch(output, /o root/);
 });
 
 test("explains why a selected repository cannot be pulled", () => {
@@ -88,7 +89,9 @@ test("maps navigation and action keys", () => {
     assert.equal(tuiActionForKey({ name: "space" }), "toggle");
     assert.equal(tuiActionForKey({ name: "c", ctrl: true }), "quit");
     assert.equal(tuiActionForKey({ name: "x" }), "fix");
-    assert.equal(tuiActionForKey({ name: "z" }), null);
+    assert.equal(tuiActionForKey({ name: "z" }), "stash");
+    assert.equal(tuiActionForKey({ name: "a", ctrl: true }), "prefix");
+    assert.equal(tuiActionForKey({ name: "f", ctrl: true }), null);
 });
 
 test("renders group management and membership views", () => {
@@ -195,12 +198,14 @@ test("changes roots, clears the group filter, and uses the new root for subseque
         },
         inspectMany: async (paths) => [repository({ path: paths[0] })],
         loadGroups: async () => [{ name: "Work", repositories: ["/work/example"] }],
+        loadExclusions: async () => [],
         refreshMany: async (paths) => {
             fetchedPaths.push([...paths]);
             return [{ ok: true, repository: repository({ path: paths[0] }) }];
         },
     });
     const key = (name, text = "") => input.emit("keypress", text, { name });
+    const command = (name) => { input.emit("keypress", "\u0001", { name: "a", ctrl: true }); key(name); };
     t.after(() => key("q"));
     const settle = () => new Promise((resolve) => setImmediate(resolve));
     const waitForScan = async (count) => {
@@ -211,13 +216,13 @@ test("changes roots, clears the group filter, and uses the new root for subseque
         assert.fail("Root scan did not complete.");
     };
     await waitForScan(1);
-    key("o");
+    command("o");
     assert.match(frames.at(-1), /root folder/);
     key("escape");
     assert.equal(discoveredRoots.length, 1);
 
     for (const invalid of ["", join(root, "missing"), join(process.cwd(), "README.md")]) {
-        key("o");
+        command("o");
         if (invalid) key(undefined, invalid);
         key("return");
         for (let attempts = 0; attempts < 100 && !/Failed:/.test(frames.at(-1)); attempts += 1) {
@@ -228,28 +233,28 @@ test("changes roots, clears the group filter, and uses the new root for subseque
         assert.equal(discoveredRoots.length, 1);
     }
 
-    key("g");
+    command("g");
     key("down");
     key("r");
     assert.match(frames.at(-1), /Rename Work/);
     key("escape");
     key("return");
     assert.match(frames.at(-1), /repositories \/ Work/);
-    key("o");
+    command("o");
     key(undefined, `~/${relative(homedir(), root)}`);
     key("return");
     await waitForScan(2);
     assert.deepEqual(discoveredRoots.at(-1), [root]);
     assert.match(frames.at(-1), /repositories \/ All repositories/);
     assert.deepEqual(initialRoots, ["/work"]);
-    key("s");
+    command("s");
     await waitForScan(3);
     assert.deepEqual(discoveredRoots.at(-1), [root]);
     key("f");
     await settle();
     assert.deepEqual(fetchedPaths, [[join(root, "example")]]);
 
-    key("o");
+    command("o");
     key(undefined, relative(process.cwd(), root));
     key("return");
     await waitForScan(5);
