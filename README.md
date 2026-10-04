@@ -32,7 +32,7 @@ pnpm install
 pnpm autopull
 ```
 
-Each repository row shows its current branch, worktree state, and remote state. Use `j`/`k` or the arrow keys to select a repository. Press `s` to scan local state, `r` to fetch and refresh remote state, `p` to fast-forward the selected repository when it is safe, and `q` to exit.
+The dashboard uses rounded panels, colored state meters, and a highlighted repository selection. At 120 columns or wider, repository details sit beside the list; smaller terminals stack the panels. `NO_COLOR=1` disables colors while preserving the selection highlight. Each repository row shows its current branch, worktree state, and remote state. Use `j`/`k` or the arrow keys to select a repository. Press `s` to scan local state, `r` to fetch and refresh remote state, `p` to fast-forward the selected repository when it is safe, and `q` to exit.
 
 Press `g` to manage repository groups. The group screen can create, rename, delete, and edit group membership. Select a group to filter the dashboard, then press `a` to pull every repository in that group with a waiting update. Autopull asks for confirmation and checks each repository again before running `git pull --ff-only`. Group definitions are stored in `~/.config/autopull/groups.json`. Set `AUTOPULL_GROUPS_FILE` to use another file.
 

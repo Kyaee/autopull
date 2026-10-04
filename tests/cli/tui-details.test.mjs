@@ -46,7 +46,7 @@ test("wraps the selected repository blocker instead of truncating it", () => {
     const output = renderTui(model, { columns: 60, rows: 24 });
 
     assert.match(output, /Action\s+Blocked: local changes are present; the current/);
-    assert.match(output, /\n\s+branch has no upstream/);
+    assert.match(output, /\n│\s+branch has no upstream/);
     assert.match(output, /Files\s+src\/a-long-directory\/changed-file\.ts/);
     assert.match(output, /SCOPE\s+All repositories/);
     assert.match(output, /↑↓\/jk move/);

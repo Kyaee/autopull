@@ -19,19 +19,20 @@ const ANSI_RESET = "\u001b[0m";
 
 const paintLine = (line, color) => {
     if (line.startsWith("›")) return `\u001b[1;7m${line}${ANSI_RESET}`;
-    if (/^─+$/.test(line)) return `\u001b[2m${line}${ANSI_RESET}`;
-    if (line.startsWith("AUTOPULL")) return `\u001b[1m${line}${ANSI_RESET}`;
+    if (!color) return line;
+    if (line.startsWith("AUTOPULL")) return `\u001b[1;36m${line}${ANSI_RESET}`;
     if (/^\s*(?:REPOSITORY|BRANCH)\s+/.test(line) && line.includes("STATE")) {
         return `\u001b[2m${line}${ANSI_RESET}`;
     }
-    if (!color) return line;
-
     return line
-        .replace(/\b(CONFLICT(?: \d+)?|ERROR|BLOCKED)\b/g, "\u001b[1;31m$1\u001b[0m")
+        .replace(/\b(CONFLICT(?: \d+)?|ERROR|BLOCKED|DIVERGED)\b/g, "\u001b[1;31m$1\u001b[0m")
         .replace(/\b(DIRTY(?: \d+)?|NO-UPSTREAM|DETACHED)\b/g, "\u001b[33m$1\u001b[0m")
         .replace(/\b(BEHIND(?: \d+)?|READY)\b/g, "\u001b[36m$1\u001b[0m")
         .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
-        .replace(/\bCURRENT\b/g, "\u001b[2m$&\u001b[0m");
+        .replace(/\bCURRENT\b/g, "\u001b[32m$&\u001b[0m")
+        .replace(/(█+|░+)/gu, "\u001b[36m$1\u001b[0m")
+        .replace(/(↑↓\/jk|Enter\/Esc|Enter|Esc|Space|[srpgaqned])(?= (?:move|scan|refresh|pull|groups|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel))/gu,
+            "\u001b[1;36m$1\u001b[0m");
 };
 
 const stateLabel = (repository) => {
@@ -61,8 +62,10 @@ const remoteLabel = (repository) => {
     return "current";
 };
 
+const displayText = (value) => String(value).replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ");
+
 const fit = (value, width) => {
-    const text = String(value);
+    const text = displayText(value);
     if (width <= 0) return "";
     if (text.length <= width) return text.padEnd(width);
     if (width === 1) return "…";
@@ -137,11 +140,11 @@ const actionLabel = (repository) => {
     return "No update is waiting";
 };
 
-const DETAIL_ROWS = 10;
+const DETAIL_ROWS = 11;
 
 const wrapText = (value, width) => {
     if (width <= 1) return [String(value).slice(0, Math.max(0, width))];
-    const source = String(value);
+    const source = displayText(value);
     const words = [...source.matchAll(/\S+/gu)];
     if (words.length === 0) return [""];
     const lines = [];
@@ -184,7 +187,6 @@ const limitedLabeledLines = (label, value, width, limit) => {
 const repositoryDetailLines = (repository, width) => {
     const firstChange = repository.changedFiles[0]?.path;
     const lines = [
-        "─".repeat(width),
         fit(`${repository.name}  ${stateLabel(repository)}`, width),
         fit(repository.path, width),
         ...limitedLabeledLines("Branch", `${branchLabel(repository)}  →  ${repository.upstream ?? "no upstream"}`, width, 2),
@@ -198,97 +200,121 @@ const repositoryDetailLines = (repository, width) => {
     return lines;
 };
 
-const cropLines = (lines, rows, footer) => {
-    if (lines.length + footer.length <= rows) {
-        return [...lines, ...Array.from({ length: rows - lines.length - footer.length }, () => ""), ...footer];
-    }
-    const visibleContent = Math.max(1, rows - footer.length);
-    return [...lines.slice(0, visibleContent), ...footer];
-};
-
 const selectedGroup = (model) => model.groupIndex === 0 ? null : model.groups[model.groupIndex - 1];
 
-const renderModal = (model, lines, width) => {
-    lines.push("", "─".repeat(width), fit(model.modal.title, width));
-    if (model.modal.kind === "input") {
-        lines.push(fit(`> ${model.modal.value}_`, width), "", "Enter save  Esc cancel");
-    } else {
-        lines.push("", "Press y to confirm or any other key to cancel.");
+// Fit before adding ANSI escapes so borders remain aligned in every color mode.
+const panel = (title, content, width, height, terminal, accent = 36) => {
+    const inner = Math.max(1, width - 4);
+    const styled = terminal.style || terminal.color;
+    const border = (line) => terminal.color ? `\u001b[${accent}m${line}${ANSI_RESET}` : line;
+    const heading = ` ${title} `;
+    const top = `╭─${fit(heading, width - 4).trimEnd()}`;
+    const lines = [border(`${top}${"─".repeat(Math.max(0, width - top.length - 1))}╮`)];
+    for (let index = 0; index < height - 2; index += 1) {
+        const line = fit(content[index] ?? "", inner);
+        lines.push(`${border("│")} ${styled ? paintLine(line, terminal.color) : line} ${border("│")}`);
     }
+    lines.push(border(`╰${"─".repeat(width - 2)}╯`));
+    return lines;
 };
 
-const renderGroups = (model, lines, width, rows) => {
-    lines.push("Repository groups", "");
-    const entries = [{ name: "All repositories", repositories: model.allRepositories.map((repository) => repository.path) }, ...model.groups];
-    const visible = viewport(entries, model.groupIndex, Math.max(2, rows - 8));
-    for (const [index, group] of visible.items.entries()) {
-        const marker = visible.offset + index === model.groupIndex ? "›" : " ";
-        const active = group.name === model.activeGroup || (model.activeGroup === null && visible.offset + index === 0)
-            ? "  active"
-            : "";
-        lines.push(fit(`${marker} ${group.name}  ${group.repositories.length} repos${active}`, width));
-    }
-};
-
-const renderMembers = (model, lines, width, rows) => {
-    const group = model.groups.find((candidate) => candidate.name === model.editingGroup);
-    const paths = new Set(group?.repositories ?? []);
-    lines.push(fit(`Edit group: ${model.editingGroup}`, width), "");
-    const visible = viewport(model.allRepositories, model.memberIndex, Math.max(2, rows - 8));
-    for (const [index, repository] of visible.items.entries()) {
-        const marker = visible.offset + index === model.memberIndex ? "›" : " ";
-        const checked = paths.has(repository.path) ? "[x]" : "[ ]";
-        lines.push(fit(`${marker} ${checked} @${branchLabel(repository)}  ${repository.name}`, width));
-    }
-    if (model.allRepositories.length === 0) lines.push("No scanned repositories.");
+const meter = (label, count, total, width) => {
+    const size = Math.max(2, width - label.length - String(count).length - 4);
+    const filled = total ? Math.round(count / total * size) : 0;
+    return `${label} ${count}  ${"█".repeat(filled)}${"░".repeat(size - filled)}`;
 };
 
 export const renderTui = (model, terminal = {}) => {
     const width = Math.max(20, terminal.columns ?? 100);
     const rows = Math.max(8, terminal.rows ?? 30);
     const summary = model.summary ?? summarize(model.repositories);
-    const busy = model.busy ? `  ${model.activity}…` : "";
-    const groupLabel = model.activeGroup ? `  Group: ${model.activeGroup}` : "";
-    const title = `AUTOPULL  ${summary.total} repos  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted${groupLabel}${busy}`;
-    const lines = [fit(title, width), "─".repeat(width)];
-
-    if (model.modal) {
-        renderModal(model, lines, width);
-    } else if (model.view === "groups") {
-        renderGroups(model, lines, width, rows);
-    } else if (model.view === "members") {
-        renderMembers(model, lines, width, rows);
-    } else if (model.repositories.length === 0) {
-        const emptyMessage = model.activeGroup
-            ? `No scanned repositories belong to ${model.activeGroup}. Press g to edit membership.`
-            : "No Git repositories found.";
-        lines.push("", model.busy ? "Scanning for Git repositories…" : emptyMessage);
-    } else {
-        const selected = model.repositories[model.selectedIndex];
-        const detailLines = selected ? repositoryDetailLines(selected, width) : [];
-        const listCapacity = Math.max(3, rows - lines.length - DETAIL_ROWS - 3);
-        const visible = viewport(model.repositories, model.selectedIndex, listCapacity);
-        lines.push(repositoryHeader(width));
-        for (const [index, repository] of visible.items.entries()) {
-            lines.push(repositoryRow(repository, visible.offset + index === model.selectedIndex, width));
-        }
-        lines.push(...detailLines);
-    }
-
-    if (model.discoveryErrors.length > 0) {
-        lines.push(fit(`Warning  ${model.discoveryErrors[0].path}: ${model.discoveryErrors[0].message}`, width));
-    }
-
     const scope = model.activeGroup ?? "All repositories";
-    const status = model.notification ? `STATUS  ${model.notification}` : `SCOPE   ${scope}  ${model.roots.join(":")}`;
+    const overview = [`AUTOPULL  ${summary.total} repos  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted`];
+    if (width >= 76) {
+        const cell = Math.floor((width - 10) / 3);
+        overview.push([
+            meter("CURRENT", summary.current, summary.total, cell),
+            meter("READY", summary.updatesReady, summary.total, cell),
+            meter("DIRTY", summary.dirty, summary.total, cell),
+        ].map((item) => fit(item, cell)).join("   "));
+    } else {
+        overview.push(`CURRENT ${summary.current}  READY ${summary.updatesReady}  DIRTY ${summary.dirty}`);
+    }
+    const warning = model.discoveryErrors[0];
+    const status = model.busy ? `● ${model.activity}…` : model.notification ? `STATUS  ${model.notification}`
+        : warning ? `Warning  ${warning.path}: ${warning.message}` : `SCOPE   ${scope}  ${model.roots.join(":")}`;
+    overview.push(status);
+    if (rows < 12) {
+        const selected = model.repositories[model.selectedIndex];
+        const compact = [overview[0], status, repositoryHeader(width),
+            selected ? repositoryRow(selected, true, width) : "No repositories found."];
+        while (compact.length < rows - 1) compact.push("");
+        compact.push("↑↓/jk move  q quit");
+        return compact.map((line) => {
+            const fitted = fit(line, width);
+            return terminal.style || terminal.color ? paintLine(fitted, terminal.color) : fitted;
+        }).join("\n");
+    }
+    const lines = panel("autopull / overview", overview, width, 5, terminal);
+    const bodyHeight = rows - 8;
+    const sideBySide = width >= 120 && bodyHeight >= DETAIL_ROWS && model.repositories.length > 0;
+    const selected = model.repositories[model.selectedIndex];
+    let content = [];
+    let title = "repositories";
+    let accent = 36;
+    if (model.modal) {
+        title = model.modal.kind === "input" ? "group / name" : "confirmation";
+        accent = 33;
+        content = [...wrapText(model.modal.title, width - 4), "",
+            model.modal.kind === "input" ? `> ${model.modal.value}_` : "Press y to confirm or any other key to cancel.",
+            model.modal.kind === "input" ? "Enter save  Esc cancel" : ""];
+    } else if (model.view === "groups") {
+        title = "Repository groups";
+        const entries = [{ name: "All repositories", repositories: model.allRepositories.map((repository) => repository.path) }, ...model.groups];
+        const visible = viewport(entries, model.groupIndex, Math.max(1, bodyHeight - 2));
+        content = visible.items.map((group, index) => {
+            const active = group.name === model.activeGroup || (!model.activeGroup && visible.offset + index === 0);
+            return `${visible.offset + index === model.groupIndex ? "›" : " "} ${group.name}  ${group.repositories.length} repos${active ? "  active" : ""}`;
+        });
+    } else if (model.view === "members") {
+        title = `Edit group: ${model.editingGroup}`;
+        const paths = new Set(model.groups.find((group) => group.name === model.editingGroup)?.repositories ?? []);
+        const visible = viewport(model.allRepositories, model.memberIndex, Math.max(1, bodyHeight - 2));
+        content = visible.items.map((repository, index) =>
+            `${visible.offset + index === model.memberIndex ? "›" : " "} ${paths.has(repository.path) ? "[x]" : "[ ]"} @${branchLabel(repository)}  ${repository.name}`);
+        if (!content.length) content.push("No scanned repositories.");
+    } else {
+        const showDetails = selected && bodyHeight >= 16;
+        const listWidth = sideBySide ? Math.floor(width * 0.60) : width;
+        const listHeight = sideBySide || !showDetails ? bodyHeight : bodyHeight - DETAIL_ROWS;
+        const visible = viewport(model.repositories, model.selectedIndex, Math.max(1, listHeight - 3));
+        title = `repositories / ${scope} / ${model.repositories.length ? `${visible.offset + 1}–${visible.offset + visible.items.length}` : "0"} of ${model.repositories.length}`;
+        content = [repositoryHeader(listWidth - 4), ...visible.items.map((repository, index) =>
+            repositoryRow(repository, visible.offset + index === model.selectedIndex, listWidth - 4))];
+        if (!model.repositories.length) content = [...wrapText(model.busy ? "Scanning for Git repositories…" : model.activeGroup
+            ? `No scanned repositories belong to ${scope}. Press g to edit membership.`
+            : "No Git repositories found. Press s to scan again.", listWidth - 4)];
+        const list = panel(title, content, listWidth, listHeight, terminal);
+        if (sideBySide && selected) {
+            const detailWidth = width - listWidth - 1;
+            const detail = panel("selected / repository", repositoryDetailLines(selected, detailWidth - 4), detailWidth, bodyHeight, terminal, 34);
+            lines.push(...list.map((line, index) => `${line} ${detail[index]}`));
+        } else {
+            lines.push(...list);
+            if (showDetails) lines.push(...panel("selected / repository", repositoryDetailLines(selected, width - 4), width, DETAIL_ROWS, terminal, 34));
+        }
+    }
+    if (model.modal || model.view !== "repositories") {
+        lines.push(...panel(title, content, width, bodyHeight, terminal, accent));
+    }
     let controls = "↑↓/jk move  s scan  r refresh  p pull  g groups  q quit";
     if (model.activeGroup) controls = "↑↓/jk move  p pull  a pull group  g groups  q quit";
-    if (model.view === "groups") controls = "↑/k up  ↓/j down  Enter use  n new  e members  r rename  d delete  Esc back";
-    if (model.view === "members") controls = "↑/k up  ↓/j down  Space toggle membership  Enter/Esc done";
-    if (model.modal) controls = model.modal.kind === "input" ? "Type a group name" : "y confirm  n/Esc cancel";
-    const footer = [fit(status, width), fit(controls, width)];
-    const fitted = cropLines(lines, rows, footer).map((line) => fit(line, width));
-    return (terminal.style || terminal.color ? fitted.map((line) => paintLine(line, terminal.color)) : fitted).join("\n");
+    if (model.view === "groups") controls = "↑↓/jk move  Enter use  n new  e members  r rename  d delete  Esc back";
+    if (model.view === "members") controls = "↑↓/jk move  Space toggle membership  Enter/Esc done";
+    if (model.modal) controls = model.modal.kind === "input" ? "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
+    if (width < 40) controls = model.modal ? "Esc cancel" : "↑↓ move  q quit";
+    lines.push(...panel("controls", [controls], width, 3, terminal));
+    return lines.slice(0, rows).join("\n");
 };
 
 export const tuiActionForKey = (key = {}) => {

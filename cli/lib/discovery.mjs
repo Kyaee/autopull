@@ -36,8 +36,12 @@ const readableDirectory = async (directory) => {
 
 export const discoverRepositories = async (roots, options = {}) => {
     const maxDepth = Number.isInteger(options.maxDepth) ? options.maxDepth : 4;
+    const concurrency = options.concurrency ?? 8;
+    if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) {
+        throw new RangeError("Discovery concurrency must be an integer from 1 to 32.");
+    }
     const ignoredNames = new Set([...DEFAULT_IGNORES, ...(options.ignoredNames ?? [])]);
-    const queue = [];
+    let frontier = [];
     const seen = new Set();
     const repositories = [];
     const errors = [];
@@ -48,38 +52,35 @@ export const discoverRepositories = async (roots, options = {}) => {
             errors.push({ path, message: "Root is not a readable directory." });
             continue;
         }
-        queue.push({ path, depth: 0 });
+        frontier.push({ path, depth: 0 });
     }
 
-    while (queue.length > 0) {
-        const current = queue.shift();
+    const visit = async (current) => {
         let canonicalPath;
 
         try {
             canonicalPath = await realpath(current.path);
         } catch (error) {
-            errors.push({ path: current.path, message: error.message });
-            continue;
+            return { error: { path: current.path, message: error.message } };
         }
 
-        if (seen.has(canonicalPath)) continue;
+        if (seen.has(canonicalPath)) return {};
         seen.add(canonicalPath);
 
         if (await isGitRepository(canonicalPath)) {
-            repositories.push(canonicalPath);
-            continue;
+            return { repository: canonicalPath };
         }
 
-        if (current.depth >= maxDepth) continue;
+        if (current.depth >= maxDepth) return {};
 
         let entries;
         try {
             entries = await readdir(canonicalPath, { withFileTypes: true });
         } catch (error) {
-            errors.push({ path: canonicalPath, message: error.message });
-            continue;
+            return { error: { path: canonicalPath, message: error.message } };
         }
 
+        const children = [];
         for (const entry of entries) {
             if (
                 !entry.isDirectory()
@@ -87,7 +88,30 @@ export const discoverRepositories = async (roots, options = {}) => {
                 || entry.name.startsWith(".")
                 || ignoredNames.has(entry.name)
             ) continue;
-            queue.push({ path: resolve(canonicalPath, entry.name), depth: current.depth + 1 });
+            children.push({ path: resolve(canonicalPath, entry.name), depth: current.depth + 1 });
+        }
+        return { children };
+    };
+
+    // Finish each depth before starting the next so overlapping roots are
+    // always visited at their shallowest depth. Keep filesystem work bounded.
+    while (frontier.length > 0) {
+        const results = new Array(frontier.length);
+        let cursor = 0;
+        const worker = async () => {
+            while (cursor < frontier.length) {
+                const index = cursor++;
+                results[index] = await visit(frontier[index]);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(concurrency, frontier.length) }, worker));
+        frontier = [];
+        for (const result of results) {
+            if (result.repository) repositories.push(result.repository);
+            if (result.error) errors.push(result.error);
+            if (result.children) {
+                for (const child of result.children) frontier.push(child);
+            }
         }
     }
 
