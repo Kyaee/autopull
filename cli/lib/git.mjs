@@ -25,13 +25,16 @@ export const runGit = async (repositoryPath, args, options = {}) => {
     try {
         const { stdout, stderr } = await execFileAsync("git", commandArgs, {
             encoding: "utf8",
-            maxBuffer: 4 * 1024 * 1024,
+            maxBuffer: options.maxBufferBytes ?? 4 * 1024 * 1024,
             timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
             windowsHide: true,
         });
 
         return { stdout, stderr };
     } catch (error) {
+        if (options.acceptExitCodes?.includes(error.code)) {
+            return { stdout: String(error.stdout ?? ""), stderr: String(error.stderr ?? "") };
+        }
         throw new GitCommandError(commandArgs, error);
     }
 };
@@ -225,4 +228,31 @@ export const fetchRepository = async (repositoryPath) => {
             repository: await inspectRepository(repositoryPath).catch(() => before),
         };
     }
+};
+
+export const readRepositoryDiff = async (repositoryPath) => {
+    const gitOptions = { maxBufferBytes: 64 * 1024 * 1024, timeoutMs: 120_000 };
+    const diffOptions = ["--no-ext-diff", "--no-textconv", "--no-color", "--binary", "--"];
+    const sections = [];
+    const tracked = [
+        ["STAGED", ["diff", "--cached", ...diffOptions]],
+        ["UNSTAGED", ["diff", ...diffOptions]],
+        ["CONFLICTS", ["diff", "--cc", ...diffOptions]],
+    ];
+
+    for (const [label, args] of tracked) {
+        const { stdout } = await runGit(repositoryPath, args, gitOptions);
+        if (stdout.trim()) sections.push(`${label}\n${stdout.trimEnd()}`);
+    }
+
+    const { stdout: untrackedOutput } = await runGit(repositoryPath,
+        ["ls-files", "--others", "--exclude-standard", "-z", "--"], gitOptions);
+    for (const path of untrackedOutput.split("\0").filter(Boolean)) {
+        const { stdout } = await runGit(repositoryPath, [
+            "diff", "--no-index", "--no-ext-diff", "--no-textconv", "--no-color", "--binary", "--", "/dev/null", path,
+        ], { ...gitOptions, acceptExitCodes: [1] });
+        if (stdout.trim()) sections.push(`UNTRACKED ${path}\n${stdout.trimEnd()}`);
+    }
+
+    return sections.join("\n\n");
 };
