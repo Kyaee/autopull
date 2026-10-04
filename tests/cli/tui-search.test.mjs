@@ -141,7 +141,7 @@ test("search works with an empty dashboard and quit remains available", async (t
     ui.key("q"); await ui.running;
 });
 
-test("search stays at the top with a visible input tail and fixed controls across terminal sizes and color modes", () => {
+test("search has its own top panel with a visible input tail and fixed controls across terminal sizes and color modes", () => {
     const query = "very-long-directory/with-a-long-query-tail";
     const base = { roots: ["/work"], repositories, discoveryErrors: [], selectedIndex: 0, view: "repositories", searchQuery: query };
     for (const columns of [20, 60, 80, 120]) {
@@ -150,7 +150,10 @@ test("search stays at the top with a visible input tail and fixed controls acros
                 const focused = renderTui({ ...base, searchEditing: true }, { columns, rows, color, style: true });
                 const idle = plain(renderTui(base, { columns, rows, color, style: true })).split("\n");
                 const lines = plain(focused).split("\n");
-                assert.match(lines[rows < 12 ? 0 : 1], /Search \/.*tail_/);
+                assert.match(lines[0], /╭─ search/);
+                assert.match(lines[1], /Search \/.*tail_/);
+                assert.match(lines[2], /╰─.*╯/);
+                if (rows >= 14) assert.match(lines[3], /╭─ autopull/);
                 assert.match(lines.at(rows < 12 ? -1 : -2), /Enter apply/);
                 assert.equal(lines.length, rows);
                 assert.ok(lines.every((line) => line.length === columns));

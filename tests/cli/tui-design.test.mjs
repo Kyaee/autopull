@@ -67,7 +67,7 @@ test("colors repository names by severity across layouts and preserves selection
     ];
     for (const columns of [60, 100, 140]) {
         const state = model(repositories);
-        const output = renderTui(state, { columns, rows: 32, color: true });
+        const output = renderTui(state, { columns, rows: 36, color: true });
         assert.doesNotMatch(output, /\u001b\[31mERROR\u001b/);
         for (const repo of repositories.slice(1)) {
             const code = ["error", "conflict"].includes(repo.state) ? 31 : 33;
@@ -75,11 +75,11 @@ test("colors repository names by severity across layouts and preserves selection
         }
         for (const selectedIndex of [1, 3]) {
             state.selectedIndex = selectedIndex;
-            const colored = renderTui(state, { columns, rows: 32, color: true });
+            const colored = renderTui(state, { columns, rows: 36, color: true });
             const code = selectedIndex === 1 ? 31 : 33;
             assert.ok(colored.includes(`\u001b[27;${code};100m${repositories[selectedIndex].name}\u001b[39;49;7m`));
             assert.ok(plain(colored).split("\n").every((line) => line.length === columns));
-            const monochrome = renderTui(state, { columns, rows: 32, style: true, color: false });
+            const monochrome = renderTui(state, { columns, rows: 36, style: true, color: false });
             assert.match(monochrome, /\u001b\[1;7m›/);
             assert.doesNotMatch(monochrome, /\u001b\[(?:31|33|27;31;100|27;33;100)m/);
         }

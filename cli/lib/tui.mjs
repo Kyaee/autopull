@@ -90,8 +90,8 @@ const floatingCommands = (lines, model, width, terminal, controlRows) => {
     const result = [...lines];
     if (compact && top > 0) {
         // Keep the focused repository visible when a tiny terminal needs a full-width popup.
-        const focused = lines.find((line) => line.includes("›"));
-        if (focused) result[0] = focused;
+        const focusedIndex = lines.findIndex((line) => line.includes("›"));
+        if (focusedIndex >= top && focusedIndex < top + popup.length) result[top - 1] = lines[focusedIndex];
     }
     for (let index = 0; index < popup.length; index += 1) {
         const original = result[top + index];
@@ -370,7 +370,8 @@ export const renderTui = (model, terminal = {}) => {
     const scope = model.activeGroup ?? "All repositories";
     const showMeters = rows >= 26;
     const selection = model.markedPaths?.length ? `  ${model.markedPaths.length} selected` : "";
-    const overview = [searchRow(model, width - 4), `AUTOPULL  ${summary.total} repos${selection}  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted`];
+    const search = panel("search / repositories", [searchRow(model, width - 4)], width, 3, terminal, 34);
+    const overview = [`AUTOPULL  ${summary.total} repos${selection}  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted`];
     if (showMeters && width >= 76) {
         const cell = Math.floor((width - 10) / 3);
         overview.push([
@@ -385,41 +386,50 @@ export const renderTui = (model, terminal = {}) => {
     const status = model.busy ? `${SPINNER_FRAMES[(model.spinnerFrame ?? 0) % SPINNER_FRAMES.length]} ${model.activity}…` : model.notification ? `STATUS  ${model.notification}`
         : warning ? `Warning  ${warning.path}: ${warning.message}` : `SCOPE   ${scope}  ${model.roots.join(":")}`;
     overview.push(status);
-    if (rows < 12) {
+    if (rows < 14) {
+        const controlRows = rows < 12 ? 1 : 3;
+        const showSearch = model.view === "repositories" && !model.modal;
+        const contentRows = rows - controlRows - (showSearch ? search.length : 0);
         const selected = model.repositories[model.selectedIndex];
         const selectedLine = selected ? selectionRow(model, selected, true, width)
             : model.searchQuery?.trim() ? "No search matches." : "No repositories found.";
-        let compact = [searchRow(model, width), overview[1], status, selectionHeader(model, width),
+        let compact = [overview[0], status, selectionHeader(model, width),
             selectedLine];
         if (model.modal?.kind === "agents") {
-            const visible = viewport(model.modal.agents, model.modal.selectedIndex, rows - 3);
+            const visible = viewport(model.modal.agents, model.modal.selectedIndex, contentRows - 2);
             compact = [`Fix ${model.modal.repository.name}`, "Choose a coding CLI",
                 ...visible.items.map((agent, index) => `${visible.offset + index === model.modal.selectedIndex ? "›" : " "} ${agent.name}`)];
         } else if (model.modal?.kind === "branches") {
-            const visible = viewport(model.modal.branches, model.modal.selectedIndex, rows - 3);
+            const visible = viewport(model.modal.branches, model.modal.selectedIndex, contentRows - 2);
             compact = [`Branch / ${model.modal.repository.name}`, `Current: ${branchLabel(model.modal.repository)}`,
                 ...visible.items.map((branch, index) => `${visible.offset + index === model.modal.selectedIndex ? "›" : " "} ${branchChoiceLabel(branch)}`)];
         } else if (model.modal?.kind === "input") {
-            compact = [model.modal.heading ?? "group / name", ...wrapText(model.modal.title, width).slice(0, rows - 4),
+            compact = [model.modal.heading ?? "group / name", ...wrapText(model.modal.title, width).slice(0, contentRows - 3),
                 `> ${model.modal.value}_`];
         } else if (model.modal?.kind === "confirm") {
-            compact = ["Confirm", ...wrapText(model.modal.compactTitle ?? model.modal.title, width).slice(0, rows - 2)];
+            compact = ["Confirm", ...wrapText(model.modal.compactTitle ?? model.modal.title, width).slice(0, contentRows - 1)];
         } else if (model.view === "exclusions") {
             const directories = model.excludedDirectories ?? [];
-            const visible = viewport(directories, model.excludedIndex ?? 0, rows - 3);
+            const visible = viewport(directories, model.excludedIndex ?? 0, contentRows - 2);
             compact = ["Hidden directories", "Enter restore e edit",
                 ...visible.items.map((path, index) => `${visible.offset + index === model.excludedIndex ? "›" : " "} ${path}`)];
         }
-        while (compact.length < rows - 1) compact.push("");
-        const controls = model.searchEditing ? "Enter apply Esc back" : model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
-            ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : model.modal.kind === "branches" ? "switch" : model.modal.kind === "agents" || model.modal.heading === "coding CLI" ? "open" : "save")} Esc cancel`
+        while (compact.length < contentRows) compact.push("");
+        const submitLabel = model.modal?.submitLabel ?? (model.modal?.heading === "root folder" ? "scan"
+            : model.modal?.kind === "branches" ? "switch" : model.modal?.kind === "agents" || model.modal?.heading === "coding CLI" ? "open" : "save");
+        let controls = model.searchEditing ? "Enter apply Esc back" : model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
+            ? `Enter ${submitLabel} Esc cancel`
             : model.view === "exclusions" ? "Esc back q quit" : width < 40 ? "Ctrl+A more q quit" : "↑↓ jk move Space mark Ctrl+A more q quit";
-        const lines = [...compact.map((line) => paintContent(line, width, terminal)), paintContent(controls, width, terminal)];
-        return floatingCommands(lines, model, width, terminal, 1).join("\n");
+        if (width < 40 && controlRows > 1) controls = model.searchEditing ? "Enter apply Esc"
+            : model.modal?.kind === "confirm" ? "y confirm n/Esc" : model.modal ? `Enter ${submitLabel} Esc`
+            : model.view === "exclusions" ? "Esc back q quit" : "^A more q quit";
+        const lines = [...(showSearch ? search : []), ...compact.map((line) => paintContent(line, width, terminal)),
+            ...(controlRows === 1 ? [paintContent(controls, width, terminal)] : panel("controls", [controls], width, controlRows, terminal))];
+        return floatingCommands(lines, model, width, terminal, controlRows).join("\n");
     }
-    const overviewHeight = showMeters ? 6 : 5;
-    const lines = panel(`autopull / ${model.roots.join(":")}`, overview, width, overviewHeight, terminal);
-    const bodyHeight = rows - overviewHeight - 3;
+    const overviewHeight = showMeters ? 5 : 4;
+    const lines = [...search, ...panel(`autopull / ${model.roots.join(":")}`, overview, width, overviewHeight, terminal)];
+    const bodyHeight = rows - search.length - overviewHeight - 3;
     const sideBySide = width >= 120 && bodyHeight >= DETAIL_ROWS && model.repositories.length > 0;
     const selected = model.repositories[model.selectedIndex];
     let content = [];
@@ -473,9 +483,10 @@ export const renderTui = (model, terminal = {}) => {
             `${visible.offset + index === model.memberIndex ? "›" : " "} ${paths.has(repository.path) ? "[x]" : "[ ]"} @${branchLabel(repository)}  ${repository.name}`);
         if (!content.length) content.push("No scanned repositories.");
     } else {
-        const showDetails = selected && bodyHeight >= 16;
+        const showDetails = selected && bodyHeight >= 14;
+        const detailHeight = bodyHeight < 16 ? DETAIL_ROWS - 1 : DETAIL_ROWS;
         const listWidth = sideBySide ? Math.floor(width * 0.60) : width;
-        const listHeight = sideBySide || !showDetails ? bodyHeight : bodyHeight - DETAIL_ROWS;
+        const listHeight = sideBySide || !showDetails ? bodyHeight : bodyHeight - detailHeight;
         const visible = viewport(model.repositories, model.selectedIndex, Math.max(1, listHeight - 3));
         title = `repositories / ${scope} / ${model.repositories.length ? `${visible.offset + 1}–${visible.offset + visible.items.length}` : "0"} of ${model.repositories.length}`;
         content = [selectionHeader(model, listWidth - 4), ...visible.items.map((repository, index) =>
@@ -491,7 +502,12 @@ export const renderTui = (model, terminal = {}) => {
             lines.push(...list.map((line, index) => `${line} ${detail[index]}`));
         } else {
             lines.push(...list);
-            if (showDetails) lines.push(...panel("selected / repository", repositoryDetailLines(selected, width - 4), width, DETAIL_ROWS, terminal, 34));
+            if (showDetails) {
+                const compactDetails = detailHeight < DETAIL_ROWS;
+                const detailTitle = compactDetails ? `selected / ${selected.name} ${stateLabel(selected)}` : "selected / repository";
+                const detailContent = repositoryDetailLines(selected, width - 4).slice(compactDetails ? 1 : 0);
+                lines.push(...panel(detailTitle, detailContent, width, detailHeight, terminal, 34));
+            }
         }
     }
     if (model.modal || model.view !== "repositories") {
@@ -510,8 +526,8 @@ export const renderTui = (model, terminal = {}) => {
         : model.modal.heading === "excluded directory"
         ? "Type a folder path  Enter save  Esc cancel"
         : "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
-    if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal?.kind === "branches" ? "Enter switch Esc" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
-    if (model.searchEditing) controls = width < 40 ? "Enter apply Esc back" : "Enter apply  Esc cancel  Ctrl+U clear";
+    if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n/Esc" : model.modal?.kind === "branches" ? "Enter switch Esc" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
+    if (model.searchEditing) controls = width < 40 ? "Enter apply Esc" : "Enter apply  Esc cancel  Ctrl+U clear";
     lines.push(...panel("controls", [controls], width, 3, terminal));
     return floatingCommands(lines.slice(0, rows), model, width, terminal, 3).join("\n");
 };

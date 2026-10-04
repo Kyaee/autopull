@@ -152,11 +152,14 @@ test("marked checkboxes retain cursor, branch, name colors, and footer alignment
                 const rendered = renderTui(model, { columns, rows, color, style: true });
                 const output = rendered.replace(/\u001b\[[0-9;]*m/gu, "");
                 assert.match(output, /› \[ \]/);
-                if (columns >= 60 && rows >= 24) assert.match(output, /\[x\]/);
+                if (columns >= 60) assert.match(output, /2 selected/);
+                // Short stacked layouts reserve the list for the focused repository.
+                const neighborsVisible = columns >= 60 && (rows >= 32 || columns >= 120 && rows >= 24);
+                if (neighborsVisible) assert.match(output, /\[x\]/);
                 assert.match(output, /q quit/);
                 assert.equal(output.split("\n").length, rows);
                 assert.ok(output.split("\n").every((line) => line.length === columns));
-                if (color && columns >= 60 && rows >= 24) assert.ok(rendered.includes("\u001b[33mtwo\u001b[39m"));
+                if (color && neighborsVisible) assert.ok(rendered.includes("\u001b[33mtwo\u001b[39m"));
             }
         }
     }
