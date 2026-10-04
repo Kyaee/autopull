@@ -114,7 +114,7 @@ const paintLine = (line, color) => {
         .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
         .replace(/\bCURRENT\b/g, "\u001b[32m$&\u001b[0m")
         .replace(/(█+|░+)/gu, "\u001b[36m$1\u001b[0m")
-        .replace(/(?<![\p{L}\p{N}])(↑↓ jk|Ctrl\+A|\^A|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxhzvc])(?= (?:move|mark|more|scan|switch|fetch|fix|stash|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add|all|clear))/gu,
+        .replace(/(?<![\p{L}\p{N}])(↑↓ jk|Ctrl\+A|Ctrl\+U|\^A|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxhzvc])(?= (?:move|mark|more|scan|switch|fetch|fix|stash|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add|all|clear|apply))/gu,
             "\u001b[1;36m$1\u001b[0m");
 };
 
@@ -239,10 +239,29 @@ const selectionRow = (model, repository, selected, width) => {
     return row;
 };
 
+const searchRow = (model, width) => {
+    const label = "Search /  ";
+    const query = displayText(model.searchQuery ?? "");
+    const value = model.searchEditing
+        ? `${query.slice(-Math.max(1, width - label.length - 1))}_`
+        : query || "Press / to search";
+    return { kind: "search", text: `${label}${value}`, active: model.searchEditing };
+};
+
+const matchesSearch = (repository, query = "") => {
+    const needle = query.trim().toLowerCase();
+    return !needle || [repository.name, repository.path, repository.branch]
+        .some((value) => String(value ?? "").toLowerCase().includes(needle));
+};
+
 const paintContent = (value, width, terminal) => {
     const row = typeof value === "object" ? value : null;
     const line = fit(row ? row.text : value, width);
     if (!terminal.style && !terminal.color) return line;
+    if (row?.kind === "search") {
+        if (terminal.color) return `\u001b[${row.active ? "1;97;44" : "36"}m${line}${ANSI_RESET}`;
+        return row.active ? `\u001b[1;7m${line}${ANSI_RESET}` : line;
+    }
     if (!row) return paintLine(line, terminal.color);
     if (!terminal.color) return paintLine(line, false);
     const start = Math.min(row.nameStart, line.length);
@@ -349,16 +368,17 @@ export const renderTui = (model, terminal = {}) => {
     const rows = Math.max(8, terminal.rows ?? 30);
     const summary = model.summary ?? summarize(model.repositories);
     const scope = model.activeGroup ?? "All repositories";
+    const showMeters = rows >= 26;
     const selection = model.markedPaths?.length ? `  ${model.markedPaths.length} selected` : "";
-    const overview = [`AUTOPULL  ${summary.total} repos${selection}  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted`];
-    if (width >= 76) {
+    const overview = [searchRow(model, width - 4), `AUTOPULL  ${summary.total} repos${selection}  ${summary.updatesReady} ready  ${summary.dirty} dirty  ${summary.conflicts} conflicted`];
+    if (showMeters && width >= 76) {
         const cell = Math.floor((width - 10) / 3);
         overview.push([
             meter("CURRENT", summary.current, summary.total, cell),
             meter("READY", summary.updatesReady, summary.total, cell),
             meter("DIRTY", summary.dirty, summary.total, cell),
         ].map((item) => fit(item, cell)).join("   "));
-    } else {
+    } else if (showMeters) {
         overview.push(`CURRENT ${summary.current}  READY ${summary.updatesReady}  DIRTY ${summary.dirty}`);
     }
     const warning = model.discoveryErrors[0];
@@ -367,8 +387,9 @@ export const renderTui = (model, terminal = {}) => {
     overview.push(status);
     if (rows < 12) {
         const selected = model.repositories[model.selectedIndex];
-        const selectedLine = selected ? selectionRow(model, selected, true, width) : "No repositories found.";
-        let compact = [overview[0], status, selectionHeader(model, width),
+        const selectedLine = selected ? selectionRow(model, selected, true, width)
+            : model.searchQuery?.trim() ? "No search matches." : "No repositories found.";
+        let compact = [searchRow(model, width), overview[1], status, selectionHeader(model, width),
             selectedLine];
         if (model.modal?.kind === "agents") {
             const visible = viewport(model.modal.agents, model.modal.selectedIndex, rows - 3);
@@ -390,14 +411,15 @@ export const renderTui = (model, terminal = {}) => {
                 ...visible.items.map((path, index) => `${visible.offset + index === model.excludedIndex ? "›" : " "} ${path}`)];
         }
         while (compact.length < rows - 1) compact.push("");
-        const controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
+        const controls = model.searchEditing ? "Enter apply Esc back" : model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
             ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : model.modal.kind === "branches" ? "switch" : model.modal.kind === "agents" || model.modal.heading === "coding CLI" ? "open" : "save")} Esc cancel`
             : model.view === "exclusions" ? "Esc back q quit" : width < 40 ? "Ctrl+A more q quit" : "↑↓ jk move Space mark Ctrl+A more q quit";
         const lines = [...compact.map((line) => paintContent(line, width, terminal)), paintContent(controls, width, terminal)];
         return floatingCommands(lines, model, width, terminal, 1).join("\n");
     }
-    const lines = panel(`autopull / ${model.roots.join(":")}`, overview, width, 5, terminal);
-    const bodyHeight = rows - 8;
+    const overviewHeight = showMeters ? 6 : 5;
+    const lines = panel(`autopull / ${model.roots.join(":")}`, overview, width, overviewHeight, terminal);
+    const bodyHeight = rows - overviewHeight - 3;
     const sideBySide = width >= 120 && bodyHeight >= DETAIL_ROWS && model.repositories.length > 0;
     const selected = model.repositories[model.selectedIndex];
     let content = [];
@@ -459,7 +481,8 @@ export const renderTui = (model, terminal = {}) => {
         content = [selectionHeader(model, listWidth - 4), ...visible.items.map((repository, index) =>
             selectionRow(model, repository, visible.offset + index === model.selectedIndex, listWidth - 4))];
         if (!model.repositories.length) content = [...wrapText(model.busy ? "Scanning for Git repositories…" : model.activeGroup
-            ? `No scanned repositories belong to ${scope}. Press Ctrl+A then g to edit membership.`
+            && !model.searchQuery?.trim() ? `No scanned repositories belong to ${scope}. Press Ctrl+A then g to edit membership.`
+            : model.searchQuery?.trim() ? `No repositories match "${model.searchQuery.trim()}".${model.searchEditing ? "" : " Press / to edit the search."}`
             : "No Git repositories found. Press Ctrl+A then s to scan again.", listWidth - 4)];
         const list = panel(title, content, listWidth, listHeight, terminal);
         if (sideBySide && selected) {
@@ -488,6 +511,7 @@ export const renderTui = (model, terminal = {}) => {
         ? "Type a folder path  Enter save  Esc cancel"
         : "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
     if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal?.kind === "branches" ? "Enter switch Esc" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
+    if (model.searchEditing) controls = width < 40 ? "Enter apply Esc back" : "Enter apply  Esc cancel  Ctrl+U clear";
     lines.push(...panel("controls", [controls], width, 3, terminal));
     return floatingCommands(lines.slice(0, rows), model, width, terminal, 3).join("\n");
 };
@@ -495,9 +519,11 @@ export const renderTui = (model, terminal = {}) => {
 export const tuiActionForKey = (key = {}) => {
     if (key.ctrl && key.name === "c") return "quit";
     if (key.ctrl && key.name === "a") return "prefix";
-    if (key.ctrl || key.meta) return null;
-    if (key.name === "q") return "quit";
+    // Node's keypress decoder sets meta=true for a standalone Escape.
     if (key.name === "escape") return "back";
+    if (key.ctrl || key.meta) return null;
+    if (key.name === "/" || key.name === "slash" || key.sequence === "/") return "search";
+    if (key.name === "q") return "quit";
     if (key.name === "up" || key.name === "j") return "up";
     if (key.name === "down" || key.name === "k") return "down";
     if (key.name === "s") return "scan";
@@ -553,6 +579,9 @@ export const runTui = async (options, io = process, services = {}) => {
         discoveryErrors: [],
         selectedIndex: 0,
         markedPaths: [],
+        searchQuery: "",
+        searchEditing: false,
+        searchSnapshot: null,
         groups: [],
         activeGroup: null,
         groupIndex: 0,
@@ -590,7 +619,8 @@ export const runTui = async (options, io = process, services = {}) => {
             model.activeGroup = null;
         }
         const included = model.allRepositories.filter((repository) => !isDirectoryExcluded(repository.path, model.excludedDirectories));
-        model.repositories = repositoriesInGroup(included, model.groups, model.activeGroup);
+        model.repositories = repositoriesInGroup(included, model.groups, model.activeGroup)
+            .filter((repository) => matchesSearch(repository, model.searchQuery));
         const visiblePaths = new Set(model.repositories.map((repository) => repository.path));
         model.markedPaths = model.markedPaths.filter((path) => visiblePaths.has(path));
         model.excludedIndex = Math.max(0, Math.min(model.excludedIndex, model.excludedDirectories.length - 1));
@@ -657,6 +687,9 @@ export const runTui = async (options, io = process, services = {}) => {
                 model.activeGroup = null;
                 model.selectedIndex = 0;
                 model.markedPaths = [];
+                model.searchQuery = "";
+                model.searchEditing = false;
+                model.searchSnapshot = null;
                 model.allRepositories = [];
                 model.repositories = [];
                 model.summary = summarize([]);
@@ -967,6 +1000,38 @@ export const runTui = async (options, io = process, services = {}) => {
             value: "",
             submit: (value) => load(false, value),
         };
+        draw();
+    };
+
+    const openSearch = () => {
+        model.prefixArmed = false;
+        model.searchEditing = true;
+        model.searchSnapshot = {
+            query: model.searchQuery, markedPaths: [...model.markedPaths],
+            selectedPath: model.repositories[model.selectedIndex]?.path,
+        };
+        model.notification = "";
+        draw();
+    };
+
+    const updateSearch = (query) => {
+        model.searchQuery = query;
+        model.markedPaths = [...model.searchSnapshot.markedPaths];
+        applyGroupFilter();
+        draw();
+    };
+
+    const finishSearch = (cancel) => {
+        const snapshot = model.searchSnapshot;
+        model.searchQuery = cancel ? snapshot.query : model.searchQuery.trim();
+        model.markedPaths = [...snapshot.markedPaths];
+        applyGroupFilter();
+        if (cancel && snapshot.selectedPath) {
+            const index = model.repositories.findIndex((repository) => repository.path === snapshot.selectedPath);
+            if (index >= 0) model.selectedIndex = index;
+        }
+        model.searchEditing = false;
+        model.searchSnapshot = null;
         draw();
     };
 
@@ -1291,13 +1356,28 @@ export const runTui = async (options, io = process, services = {}) => {
         };
 
         const onKeypress = (text, key) => {
+            if (model.searchEditing) {
+                if (key.ctrl && key.name === "c") finish();
+                else if (key.name === "escape") finishSearch(true);
+                else if (key.name === "return") finishSearch(false);
+                else if (key.ctrl && key.name === "u") updateSearch("");
+                else if (key.name === "backspace") updateSearch(Array.from(model.searchQuery).slice(0, -1).join(""));
+                else if (!key.ctrl && !key.meta && text && !/[\u0000-\u001f\u007f-\u009f]/u.test(text)) {
+                    updateSearch(model.searchQuery + text);
+                }
+                return;
+            }
             if (handleModalKey(text, key)) return;
-            const action = tuiActionForKey(key);
+            const action = text === "/" && !key.ctrl && !key.meta ? "search" : tuiActionForKey(key);
             if (action === "quit") {
                 finish();
                 return;
             }
             if (model.busy) return;
+            if (action === "search") {
+                if (model.view === "repositories") openSearch();
+                return;
+            }
             if (action === "prefix") {
                 if (model.view === "repositories") {
                     model.prefixArmed = true;
@@ -1327,6 +1407,10 @@ export const runTui = async (options, io = process, services = {}) => {
             } else if (action === "back") {
                 if (model.view === "members") model.view = "groups";
                 else if (model.view === "groups" || model.view === "exclusions") model.view = "repositories";
+                else if (model.searchQuery) {
+                    model.searchQuery = "";
+                    applyGroupFilter();
+                }
                 else {
                     finish();
                     return;

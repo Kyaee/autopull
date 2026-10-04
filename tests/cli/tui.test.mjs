@@ -240,12 +240,15 @@ test("changes roots, clears the group filter, and uses the new root for subseque
     key("escape");
     key("return");
     assert.match(frames.at(-1), /repositories \/ Work/);
+    key(undefined, "/"); key(undefined, "missing-search"); key("return");
+    assert.match(frames.at(-1), /AUTOPULL  0 repos/);
     command("o");
     key(undefined, `~/${relative(homedir(), root)}`);
     key("return");
     await waitForScan(2);
     assert.deepEqual(discoveredRoots.at(-1), [root]);
     assert.match(frames.at(-1), /repositories \/ All repositories/);
+    assert.match(frames.at(-1), /Search \/  Press \/ to search/);
     assert.deepEqual(initialRoots, ["/work"]);
     command("s");
     await waitForScan(3);
