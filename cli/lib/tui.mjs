@@ -8,7 +8,7 @@ import { listRepositoryBranches, switchRepositoryBranch } from "./branches.mjs";
 import { canonicalDirectory, isDirectoryExcluded, loadExclusions, saveExclusions } from "./exclusions.mjs";
 import { discoverRepositories } from "./discovery.mjs";
 import { stashRepositoryChanges } from "./stash.mjs";
-import { pullRepository } from "./git.mjs";
+import { pullRepository, readRepositoryDiff } from "./git.mjs";
 import {
     createGroup,
     deleteGroup,
@@ -262,6 +262,11 @@ const paintContent = (value, width, terminal) => {
         if (terminal.color) return `\u001b[${row.active ? "1;97;44" : "36"}m${line}${ANSI_RESET}`;
         return row.active ? `\u001b[1;7m${line}${ANSI_RESET}` : line;
     }
+    if (row?.kind === "diff" && terminal.color) {
+        if (/^\+(?!\+\+)/u.test(line)) return `\u001b[32m${line}${ANSI_RESET}`;
+        if (/^-(?!--)/u.test(line)) return `\u001b[31m${line}${ANSI_RESET}`;
+        if (line.startsWith("@@")) return `\u001b[36m${line}${ANSI_RESET}`;
+    }
     if (!row) return paintLine(line, terminal.color);
     if (!terminal.color) return paintLine(line, false);
     const start = Math.min(row.nameStart, line.length);
@@ -274,7 +279,9 @@ const paintContent = (value, width, terminal) => {
 };
 
 const actionLabel = (repository) => {
-    if (!repository.canPull) return `Blocked: ${repository.blockers.join("; ")}. Press Ctrl+A then x to fix`;
+    if (!repository.canPull) return repository.dirty || repository.conflicts > 0
+        ? `Blocked: ${repository.blockers.join("; ")}. Press i to inspect the diff or Ctrl+A then x to edit`
+        : `Blocked: ${repository.blockers.join("; ")}. Press Ctrl+A then x to open a coding CLI`;
     if (repository.needsPull) return "Ready to fast-forward. Press p to pull";
     return "No update is waiting";
 };
@@ -336,8 +343,15 @@ const repositoryDetailLines = (repository, width) => {
         const remaining = repository.changedFiles.length - 1;
         lines.push(fit(`Files   ${firstChange}${remaining > 0 ? ` (+${remaining} more)` : ""}`, width));
     }
+    if (repository.dirty || repository.conflicts > 0) lines.push(fit("Diff    Press i to inspect all local changes", width));
     return lines;
 };
+
+const wrapDiffLines = (text, width) => String(text).split("\n").flatMap((source) => {
+    const line = displayText(source);
+    if (line.length <= width) return [line];
+    return Array.from({ length: Math.ceil(line.length / width) }, (_, index) => line.slice(index * width, (index + 1) * width));
+});
 
 const selectedGroup = (model) => model.groupIndex === 0 ? null : model.groups[model.groupIndex - 1];
 const branchChoiceLabel = (branch) => `${branch.name}${branch.current ? "  current" : branch.remote ? "  remote" : ""}`;
@@ -366,6 +380,34 @@ const meter = (label, count, total, width) => {
 export const renderTui = (model, terminal = {}) => {
     const width = Math.max(20, terminal.columns ?? 100);
     const rows = Math.max(8, terminal.rows ?? 30);
+    if (model.modal?.kind === "diff") {
+        const background = renderTui({ ...model, modal: null }, terminal).split("\n");
+        const popupWidth = Math.min(width, Math.max(20, Math.min(112, width - 4)));
+        const popupHeight = Math.min(rows, Math.max(8, rows - 4));
+        const innerWidth = Math.max(1, popupWidth - 4);
+        const diffLines = wrapDiffLines(model.modal.text, innerWidth);
+        const footer = width < 40 ? ["j/k scroll", "x agent  Esc"] : ["↑↓ / j/k scroll   x edit with agent   Esc close"];
+        const visibleCount = Math.max(1, popupHeight - 3 - footer.length);
+        const lastOffset = Math.max(0, diffLines.length - visibleCount);
+        model.modal.offset = Math.max(0, Math.min(model.modal.offset ?? 0, lastOffset));
+        const first = diffLines.length ? model.modal.offset + 1 : 0;
+        const last = Math.min(model.modal.offset + visibleCount, diffLines.length);
+        const title = `diff / ${model.modal.repository.name} / ${first}-${last} of ${diffLines.length}`;
+        const content = [
+            fit(model.modal.repository.path, innerWidth),
+            ...diffLines.slice(model.modal.offset, model.modal.offset + visibleCount).map((text) => ({ kind: "diff", text })),
+            ...footer,
+        ];
+        const popup = panel(title, content, popupWidth, popupHeight, terminal, 34);
+        const left = Math.floor((width - popupWidth) / 2);
+        const top = Math.floor((rows - popupHeight) / 2);
+        for (let index = 0; index < popup.length; index += 1) {
+            const lineIndex = top + index;
+            const original = background[lineIndex] ?? " ".repeat(width);
+            background[lineIndex] = `${styledSlice(original, 0, left)}${popup[index]}${styledSlice(original, left + popupWidth, width)}`;
+        }
+        return background.join("\n");
+    }
     const summary = model.summary ?? summarize(model.repositories);
     const scope = model.activeGroup ?? "All repositories";
     const showMeters = rows >= 26;
@@ -397,7 +439,7 @@ export const renderTui = (model, terminal = {}) => {
             selectedLine];
         if (model.modal?.kind === "agents") {
             const visible = viewport(model.modal.agents, model.modal.selectedIndex, contentRows - 2);
-            compact = [`Fix ${model.modal.repository.name}`, "Choose a coding CLI",
+            compact = [`${model.modal.returnToDiff ? "Edit diff" : "Fix"} ${model.modal.repository.name}`, "Choose a coding CLI",
                 ...visible.items.map((agent, index) => `${visible.offset + index === model.modal.selectedIndex ? "›" : " "} ${agent.name}`)];
         } else if (model.modal?.kind === "branches") {
             const visible = viewport(model.modal.branches, model.modal.selectedIndex, contentRows - 2);
@@ -419,10 +461,13 @@ export const renderTui = (model, terminal = {}) => {
             : model.modal?.kind === "branches" ? "switch" : model.modal?.kind === "agents" || model.modal?.heading === "coding CLI" ? "open" : "save");
         let controls = model.searchEditing ? "Enter apply Esc back" : model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
             ? `Enter ${submitLabel} Esc cancel`
-            : model.view === "exclusions" ? "Esc back q quit" : width < 40 ? "Ctrl+A more q quit" : "↑↓ jk move Space mark Ctrl+A more q quit";
+            : model.view === "exclusions" ? "Esc back q quit" : width < 40
+                ? selected?.dirty || selected?.conflicts > 0 ? "i diff ^A q quit" : "^A more q quit"
+                : "↑↓ jk move Space mark f fetch p pull i diff Ctrl+A more q quit";
         if (width < 40 && controlRows > 1) controls = model.searchEditing ? "Enter apply Esc"
             : model.modal?.kind === "confirm" ? "y confirm n/Esc" : model.modal ? `Enter ${submitLabel} Esc`
-            : model.view === "exclusions" ? "Esc back q quit" : "^A more q quit";
+            : model.view === "exclusions" ? "Esc back q quit"
+                : selected?.dirty || selected?.conflicts > 0 ? "i diff ^A q quit" : "^A more q quit";
         const lines = [...(showSearch ? search : []), ...compact.map((line) => paintContent(line, width, terminal)),
             ...(controlRows === 1 ? [paintContent(controls, width, terminal)] : panel("controls", [controls], width, controlRows, terminal))];
         return floatingCommands(lines, model, width, terminal, controlRows).join("\n");
@@ -436,10 +481,12 @@ export const renderTui = (model, terminal = {}) => {
     let title = "repositories";
     let accent = 36;
     if (model.modal?.kind === "agents") {
-        title = `fix / ${model.modal.repository.name}`;
+        title = `${model.modal.returnToDiff ? "edit diff" : "fix"} / ${model.modal.repository.name}`;
         accent = 34;
         const heading = bodyHeight >= 7
-            ? [fit(model.modal.repository.path, width - 4), model.modal.agents.length === 1
+            ? [fit(model.modal.repository.path, width - 4), model.modal.returnToDiff
+                ? "Choose a coding CLI to edit this repository's working diff."
+                : model.modal.agents.length === 1
                 ? "No known coding CLIs found on PATH." : "Choose a coding CLI to open interactively.", ""]
             : bodyHeight >= 5 ? [fit(model.modal.repository.path, width - 4)] : [];
         const visible = viewport(model.modal.agents, model.modal.selectedIndex, Math.max(1, bodyHeight - 2 - heading.length));
@@ -506,6 +553,10 @@ export const renderTui = (model, terminal = {}) => {
                 const compactDetails = detailHeight < DETAIL_ROWS;
                 const detailTitle = compactDetails ? `selected / ${selected.name} ${stateLabel(selected)}` : "selected / repository";
                 const detailContent = repositoryDetailLines(selected, width - 4).slice(compactDetails ? 1 : 0);
+                if (compactDetails && (selected.dirty || selected.conflicts > 0)) {
+                    const filesIndex = detailContent.findIndex((line) => line.startsWith("Files "));
+                    if (filesIndex >= 0) detailContent.splice(filesIndex, 1);
+                }
                 lines.push(...panel(detailTitle, detailContent, width, detailHeight, terminal, 34));
             }
         }
@@ -514,6 +565,7 @@ export const renderTui = (model, terminal = {}) => {
         lines.push(...panel(title, content, width, bodyHeight, terminal, accent));
     }
     let controls = "↑↓ jk move Space mark f fetch p pull Ctrl+A more q quit";
+    if (selected?.dirty || selected?.conflicts > 0) controls = "↑↓ jk move Space mark f fetch p pull i diff Ctrl+A more q quit";
     if (model.view === "groups") controls = "↑↓ jk move  Enter use  n new  e members  r rename  d delete  Esc back";
     if (model.view === "members") controls = "↑↓ jk move  Space toggle membership  Enter/Esc done";
     if (model.view === "exclusions") controls = "↑↓ jk Enter restore e edit n add Esc back q quit";
@@ -526,7 +578,8 @@ export const renderTui = (model, terminal = {}) => {
         : model.modal.heading === "excluded directory"
         ? "Type a folder path  Enter save  Esc cancel"
         : "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
-    if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n/Esc" : model.modal?.kind === "branches" ? "Enter switch Esc" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
+    if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n/Esc" : model.modal?.kind === "branches" ? "Enter switch Esc" : model.modal ? "Enter open Esc"
+        : model.view === "exclusions" ? "r undo q quit" : selected?.dirty || selected?.conflicts > 0 ? "i diff ^A q quit" : "^A more q quit";
     if (model.searchEditing) controls = width < 40 ? "Enter apply Esc" : "Enter apply  Esc cancel  Ctrl+U clear";
     lines.push(...panel("controls", [controls], width, 3, terminal));
     return floatingCommands(lines.slice(0, rows), model, width, terminal, 3).join("\n");
@@ -546,6 +599,7 @@ export const tuiActionForKey = (key = {}) => {
     if (key.name === "b") return "branch";
     if (key.name === "f" || key.name === "r") return "fetch";
     if (key.name === "o") return "root";
+    if (key.name === "i") return "diff";
     if (key.name === "x") return "fix";
     if (key.name === "v") return "select-all";
     if (key.name === "c") return "clear-selection";
@@ -582,6 +636,7 @@ export const runTui = async (options, io = process, services = {}) => {
     const findAgents = services.discoverCodingAgents ?? discoverCodingAgents;
     const resolveAgent = services.resolveCodingAgent ?? resolveCodingAgent;
     const launchAgent = services.launchCodingAgent ?? launchCodingAgent;
+    const readDiff = services.readRepositoryDiff ?? readRepositoryDiff;
     const readExclusions = services.loadExclusions ?? loadExclusions;
     const writeExclusions = services.saveExclusions ?? saveExclusions;
     let active = true;
@@ -1215,7 +1270,34 @@ export const runTui = async (options, io = process, services = {}) => {
 
         const onResize = () => draw();
 
-        const openAgent = async (agent, repository) => {
+        const openRepositoryDiff = async (repository) => {
+            if (!repository) {
+                model.notification = "Select a repository to inspect its diff.";
+                draw();
+                return;
+            }
+            model.busy = true;
+            model.activity = "Reading working-tree diff";
+            draw();
+            try {
+                const text = await readDiff(repository.path);
+                if (!active) return;
+                const current = model.allRepositories.find((candidate) => candidate.path === repository.path) ?? repository;
+                model.modal = {
+                    kind: "diff", repository: current,
+                    text: text || "No local diff. This repository has no staged, unstaged, untracked, or conflicted changes.",
+                    offset: 0,
+                };
+            } catch (error) {
+                model.notification = `Cannot read diff: ${error instanceof Error ? error.message : String(error)}`;
+            } finally {
+                model.busy = false;
+                model.activity = "";
+                draw();
+            }
+        };
+
+        const openAgent = async (agent, repository, { returnToDiff = false } = {}) => {
             if (!active) return;
             model.modal = null;
             model.busy = true;
@@ -1243,16 +1325,20 @@ export const runTui = async (options, io = process, services = {}) => {
             }
             await load(false);
             model.notification = `${message} ${model.notification}`;
-            draw();
+            if (returnToDiff && active) await openRepositoryDiff(repository);
+            else draw();
         };
 
-        const openCustomAgent = (repository) => {
+        const openCustomAgent = (repository, returnToDiff = false) => {
             model.modal = {
                 kind: "input",
                 heading: "coding CLI",
                 submitLabel: "open",
-                title: "Enter a CLI command, including any arguments. Quote paths with spaces. Example: kiro-cli chat",
+                title: returnToDiff
+                    ? "Enter a CLI command to open in this repository and edit its current diff. Quote paths with spaces. Example: kiro-cli chat"
+                    : "Enter a CLI command, including any arguments. Quote paths with spaces. Example: kiro-cli chat",
                 value: "",
+                returnToDiff,
                 submit: async (value) => {
                     model.busy = true;
                     model.activity = "Finding CLI";
@@ -1260,7 +1346,7 @@ export const runTui = async (options, io = process, services = {}) => {
                     try {
                         const agent = await resolveAgent(value);
                         if (!active) return;
-                        await openAgent(agent, repository);
+                        await openAgent(agent, repository, { returnToDiff });
                     } catch (error) {
                         model.notification = error instanceof Error ? error.message : String(error);
                     } finally {
@@ -1273,8 +1359,7 @@ export const runTui = async (options, io = process, services = {}) => {
             draw();
         };
 
-        const openFixPicker = async () => {
-            const repository = model.repositories[model.selectedIndex];
+        const openFixPicker = async (repository = model.repositories[model.selectedIndex], returnToDiff = false) => {
             if (!repository) {
                 model.notification = "Select a repository to fix.";
                 draw();
@@ -1290,9 +1375,11 @@ export const runTui = async (options, io = process, services = {}) => {
                 model.modal = {
                     kind: "agents", repository, selectedIndex: 0,
                     agents: [...agents, { name: "Other CLI…" }],
+                    returnToDiff,
                 };
             } catch (error) {
                 model.notification = `Cannot find coding CLIs: ${error instanceof Error ? error.message : String(error)}`;
+                if (returnToDiff && active) await openRepositoryDiff(repository);
             } finally {
                 model.busy = false;
                 model.activity = "";
@@ -1303,6 +1390,26 @@ export const runTui = async (options, io = process, services = {}) => {
         const handleModalKey = (text, key) => {
             if (!model.modal) return false;
             const modal = model.modal;
+            if (modal.kind === "diff") {
+                if (key.ctrl && key.name === "c") {
+                    finish();
+                } else if (key.name === "up" || key.name === "j") {
+                    modal.offset = Math.max(0, modal.offset - 1);
+                    draw();
+                } else if (key.name === "down" || key.name === "k") {
+                    modal.offset += 1;
+                    draw();
+                } else if (key.name === "pageup" || key.name === "pagedown") {
+                    modal.offset = Math.max(0, modal.offset + (key.name === "pageup" ? -12 : 12));
+                    draw();
+                } else if (key.name === "x") {
+                    void openFixPicker(modal.repository, true);
+                } else if (key.name === "escape" || key.name === "q") {
+                    model.modal = null;
+                    draw();
+                }
+                return true;
+            }
             if (modal.kind === "branches") {
                 const action = tuiActionForKey(key);
                 if (action === "up" || action === "down") {
@@ -1327,12 +1434,13 @@ export const runTui = async (options, io = process, services = {}) => {
                     draw();
                 } else if (action === "back" || action === "quit") {
                     model.modal = null;
-                    draw();
+                    if (modal.returnToDiff) void openRepositoryDiff(modal.repository);
+                    else draw();
                 } else if (action === "enter") {
                     const agent = modal.agents[modal.selectedIndex];
                     model.modal = null;
-                    if (agent.executable) void openAgent(agent, modal.repository);
-                    else openCustomAgent(modal.repository);
+                    if (agent.executable) void openAgent(agent, modal.repository, { returnToDiff: modal.returnToDiff });
+                    else openCustomAgent(modal.repository, modal.returnToDiff);
                 }
                 return true;
             }
@@ -1344,7 +1452,8 @@ export const runTui = async (options, io = process, services = {}) => {
             }
             if (key.name === "escape") {
                 model.modal = null;
-                draw();
+                if (modal.returnToDiff) void openRepositoryDiff(modal.repository);
+                else draw();
             } else if (key.name === "backspace") {
                 modal.value = modal.value.slice(0, -1);
                 draw();
@@ -1488,6 +1597,8 @@ export const runTui = async (options, io = process, services = {}) => {
                 void openBranchPicker();
             } else if (action === "fix") {
                 void openFixPicker();
+            } else if (action === "diff") {
+                void openRepositoryDiff(model.repositories[model.selectedIndex]);
             } else if (action === "stash") {
                 confirmStashChanges();
             } else if (action === "delete") {
