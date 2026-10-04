@@ -99,6 +99,16 @@ test("keeps selection styling when terminal colors are disabled", () => {
 
 const plain = (output) => output.replace(/\u001b\[[0-9;]*m/gu, "");
 
+test("highlights Space and Ctrl+A shortcuts without coloring fragments of words", () => {
+    const state = model([repository("selected", "current")]);
+    state.notification = "Command canceled. Press x to fix.";
+    const output = renderTui(state, { columns: 100, rows: 24, color: true });
+    assert.ok(output.includes("\u001b[1;36mSpace\u001b[0m mark"));
+    assert.ok(output.includes("\u001b[1;36mCtrl+A\u001b[0m more"));
+    assert.match(output, /Command canceled\. Press x to fix\./);
+    assert.equal(plain(output).split("\n").at(-2).length, 100);
+});
+
 test("fits panels and controls across terminal sizes and color modes", () => {
     const repositories = Array.from({ length: 35 }, (_, index) => repository(`project-${index}`, "current"));
     const state = model(repositories);

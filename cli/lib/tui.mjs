@@ -32,9 +32,7 @@ const prefixCommands = (model) => [
     ["v", "all"], ["c", "clear"],
 ];
 
-const commandBar = (model, width, terminal) => {
-    if (!model.prefixArmed || model.modal || model.view !== "repositories") return [];
-    const entries = ["Ctrl+A", ...prefixCommands(model).map(([key, label]) => `${key} ${label}`), "Esc cancel"];
+const commandLines = (entries, width) => {
     const lines = [];
     let line = "";
     for (const entry of entries) {
@@ -45,11 +43,58 @@ const commandBar = (model, width, terminal) => {
         line = line ? `${line}  ${entry}` : entry;
     }
     if (line) lines.push(line);
-    return lines.map((value) => {
-        const text = fit(value, width);
-        return terminal.color ? `\u001b[1;97;44m${text}${ANSI_RESET}`
-            : terminal.style ? `\u001b[1m${text}${ANSI_RESET}` : text;
-    });
+    return lines;
+};
+
+const styledSlice = (line, start, end) => {
+    let position = 0;
+    let styles = "";
+    let result = "";
+    let started = false;
+    for (const [token] of line.matchAll(/\u001b\[[0-9;]*m|[^\u001b]+/gu)) {
+        if (token.startsWith("\u001b")) {
+            if (position < start) styles += token;
+            else if (position < end) result += token;
+            continue;
+        }
+        const from = Math.max(0, start - position);
+        const to = Math.min(token.length, end - position);
+        if (to > from) {
+            if (!started) {
+                result = styles + result;
+                started = true;
+            }
+            result += token.slice(from, to);
+        }
+        position += token.length;
+        if (position >= end) break;
+    }
+    return result.includes("\u001b") ? result + ANSI_RESET : result;
+};
+
+const floatingCommands = (lines, model, width, terminal, controlRows) => {
+    if (!model.prefixArmed || model.modal || model.view !== "repositories") return lines;
+    const compact = width < 40;
+    const popupWidth = compact ? width : Math.min(64, width - 8);
+    const commands = [...prefixCommands(model).map(([key, label]) => `${key} ${label}`), "Esc cancel"];
+    const content = commandLines(compact ? ["Ctrl+A", ...commands] : commands, popupWidth - (compact ? 0 : 4));
+    const popup = (compact ? content.map((value) => fit(value, popupWidth))
+        : panel("Ctrl+A / commands", content, popupWidth, content.length + 2, { color: false, style: false }))
+        .map((line) => terminal.color ? `\u001b[1;97;44m${line}${ANSI_RESET}`
+            : terminal.style ? `\u001b[1m${line}${ANSI_RESET}` : line);
+    const top = Math.max(0, lines.length - controlRows - (compact ? 0 : 1) - popup.length);
+    const left = compact ? 0 : width - popupWidth - 2;
+    const result = [...lines];
+    if (compact && top > 0) {
+        // Keep the focused repository visible when a tiny terminal needs a full-width popup.
+        const focused = lines.find((line) => line.includes("›"));
+        if (focused) result[0] = focused;
+    }
+    for (let index = 0; index < popup.length; index += 1) {
+        const original = result[top + index];
+        result[top + index] = styledSlice(original, 0, left) + popup[index] + styledSlice(original, left + popupWidth, width);
+    }
+    return result;
 };
 
 const paintLine = (line, color) => {
@@ -66,7 +111,7 @@ const paintLine = (line, color) => {
         .replace(/\b(AHEAD(?: \d+)?)\b/g, "\u001b[34m$1\u001b[0m")
         .replace(/\bCURRENT\b/g, "\u001b[32m$&\u001b[0m")
         .replace(/(█+|░+)/gu, "\u001b[36m$1\u001b[0m")
-        .replace(/(↑↓ jk|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxhz])(?= (?:move|scan|fetch|fix|stash|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add))/gu,
+        .replace(/(?<![\p{L}\p{N}])(↑↓ jk|Ctrl\+A|\^A|Enter\/Esc|Enter|Esc|Space|[sfrpgaqnedoxhzvc])(?= (?:move|mark|more|scan|fetch|fix|stash|pull|groups|root|quit|new|members|rename|delete|use|back|done|toggle|confirm|cancel|open|hide|hidden|restore|edit|add|all|clear))/gu,
             "\u001b[1;36m$1\u001b[0m");
 };
 
@@ -316,14 +361,11 @@ export const renderTui = (model, terminal = {}) => {
     const status = model.busy ? `${SPINNER_FRAMES[(model.spinnerFrame ?? 0) % SPINNER_FRAMES.length]} ${model.activity}…` : model.notification ? `STATUS  ${model.notification}`
         : warning ? `Warning  ${warning.path}: ${warning.message}` : `SCOPE   ${scope}  ${model.roots.join(":")}`;
     overview.push(status);
-    const additionalControls = commandBar(model, width, terminal);
-    const layoutRows = rows - additionalControls.length;
-    if (layoutRows < 12) {
+    if (rows < 12) {
         const selected = model.repositories[model.selectedIndex];
         const selectedLine = selected ? selectionRow(model, selected, true, width) : "No repositories found.";
         let compact = [overview[0], status, selectionHeader(model, width),
             selectedLine];
-        if (layoutRows < 5) compact = layoutRows < 3 ? [selectedLine] : [overview[0], selectedLine];
         if (model.modal?.kind === "agents") {
             const visible = viewport(model.modal.agents, model.modal.selectedIndex, rows - 3);
             compact = [`Fix ${model.modal.repository.name}`, "Choose a coding CLI",
@@ -339,15 +381,15 @@ export const renderTui = (model, terminal = {}) => {
             compact = ["Hidden directories", "Enter restore e edit",
                 ...visible.items.map((path, index) => `${visible.offset + index === model.excludedIndex ? "›" : " "} ${path}`)];
         }
-        while (compact.length < layoutRows - 1) compact.push("");
+        while (compact.length < rows - 1) compact.push("");
         const controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal
             ? `Enter ${model.modal.submitLabel ?? (model.modal.heading === "root folder" ? "scan" : model.modal.kind === "agents" || model.modal.heading === "coding CLI" ? "open" : "save")} Esc cancel`
             : model.view === "exclusions" ? "Esc back q quit" : width < 40 ? "Ctrl+A more q quit" : "↑↓ jk move Space mark Ctrl+A more q quit";
-        return [...compact.map((line) => paintContent(line, width, terminal)), ...additionalControls,
-            paintContent(controls, width, terminal)].join("\n");
+        const lines = [...compact.map((line) => paintContent(line, width, terminal)), paintContent(controls, width, terminal)];
+        return floatingCommands(lines, model, width, terminal, 1).join("\n");
     }
     const lines = panel(`autopull / ${model.roots.join(":")}`, overview, width, 5, terminal);
-    const bodyHeight = layoutRows - 8;
+    const bodyHeight = rows - 8;
     const sideBySide = width >= 120 && bodyHeight >= DETAIL_ROWS && model.repositories.length > 0;
     const selected = model.repositories[model.selectedIndex];
     let content = [];
@@ -428,9 +470,8 @@ export const renderTui = (model, terminal = {}) => {
         ? "Type a folder path  Enter save  Esc cancel"
         : "Type a group name  Enter save  Esc cancel" : "y confirm  n/Esc cancel";
     if (width < 40) controls = model.modal?.kind === "confirm" ? "y confirm n cancel" : model.modal ? "Enter open Esc" : model.view === "exclusions" ? "r undo q quit" : "^A more q quit";
-    lines.push(...additionalControls);
     lines.push(...panel("controls", [controls], width, 3, terminal));
-    return lines.slice(0, rows).join("\n");
+    return floatingCommands(lines.slice(0, rows), model, width, terminal, 3).join("\n");
 };
 
 export const tuiActionForKey = (key = {}) => {

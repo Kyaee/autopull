@@ -39,10 +39,10 @@ test("Ctrl+A arms one secondary command, cancels safely, and leaves primary and 
     }
     assert.equal(scans, 1);
     prefix();
-    assert.match(frames.at(-1), /Ctrl\+A  s scan/);
+    assert.match(frames.at(-1), /Ctrl\+A \/ commands/);
     assert.match(frames.at(-1), /z stash/);
     key("escape");
-    assert.doesNotMatch(frames.at(-1), /Ctrl\+A  s scan/);
+    assert.doesNotMatch(frames.at(-1), /Ctrl\+A \/ commands/);
     prefix(); key("b"); key("g");
     assert.doesNotMatch(frames.at(-1), /Repository groups/);
     prefix(); key("x", true); key("x");
@@ -66,26 +66,37 @@ test("Ctrl+A arms one secondary command, cancels safely, and leaves primary and 
     prefix(); key("q"); await running;
 });
 
-test("prefix bar shows commands above controls while retaining the repository across terminal sizes and color modes", () => {
+test("prefix panel floats above fixed controls without shifting the dashboard across terminal sizes and color modes", () => {
     const model = { roots: ["/work"], repositories: [repository], selectedIndex: 0, discoveryErrors: [],
         view: "repositories", activeGroup: "Work", prefixArmed: true };
     for (const columns of [20, 60, 80, 120]) {
         for (const rows of [8, 12, 18, 20, 30]) {
-          for (const color of [false, true]) {
-            const rendered = renderTui(model, { columns, rows, color, style: true });
-            const output = rendered.replace(/\u001b\[[0-9;]*m/gu, "");
-            for (const command of ["s scan", "x fix", "z stash", "d hide", "h hidden", "g groups", "o root", "a group", "v all", "c clear"]) {
-                assert.ok(output.includes(command), `${columns}x${rows}: ${command}`);
+            for (const color of [false, true]) {
+                const rendered = renderTui(model, { columns, rows, color, style: true });
+                const output = rendered.replace(/\u001b\[[0-9;]*m/gu, "");
+                const base = renderTui({ ...model, prefixArmed: false }, { columns, rows, color, style: true })
+                    .replace(/\u001b\[[0-9;]*m/gu, "");
+                for (const command of ["s scan", "x fix", "z stash", "d hide", "h hidden", "g groups", "o root", "a group", "v all", "c clear"]) {
+                    assert.ok(output.includes(command), `${columns}x${rows}: ${command}`);
+                }
+                assert.match(output, /Esc cancel/);
+                assert.match(output, /›/);
+                const footerRows = rows < 12 ? 1 : 3;
+                assert.deepEqual(output.split("\n").slice(-footerRows), base.split("\n").slice(-footerRows));
+                if (rows >= 18 && columns >= 60) {
+                    assert.deepEqual(output.split("\n").slice(0, 8), base.split("\n").slice(0, 8));
+                }
+                if (columns >= 60) {
+                    const title = output.split("\n").find((line) => line.includes("Ctrl+A / commands"));
+                    assert.ok(title.indexOf("╭") >= 6);
+                    assert.match(title, /╮/);
+                }
+                assert.ok(output.indexOf("Esc cancel") < output.lastIndexOf("q quit"));
+                if (color) assert.match(rendered, /\u001b\[1;97;44m/);
+                else assert.doesNotMatch(rendered, /\u001b\[1;97;44m/);
+                assert.equal(output.split("\n").length, rows);
+                assert.ok(output.split("\n").every((line) => line.length === columns));
             }
-            assert.match(output, /Esc cancel/);
-            assert.match(output, /›/);
-            assert.ok(output.indexOf("›") < output.indexOf("Ctrl+A  s scan"));
-            assert.ok(output.indexOf("Esc cancel") < output.lastIndexOf("q quit"));
-            if (color) assert.match(rendered, /\u001b\[1;97;44m/);
-            else assert.doesNotMatch(rendered, /\u001b\[1;97;44m/);
-            assert.equal(output.split("\n").length, rows);
-            assert.ok(output.split("\n").every((line) => line.length === columns));
-          }
         }
     }
 });
