@@ -330,13 +330,13 @@ const limitedLabeledLines = (label, value, width, limit) => {
     return visible;
 };
 
-const repositoryDetailLines = (repository, width) => {
+const repositoryDetailLines = (repository, width, { compact = false } = {}) => {
     const firstChange = repository.changedFiles[0]?.path;
     const lines = [
         fit(`${repository.name}  ${stateLabel(repository)}`, width),
         fit(repository.path, width),
-        ...limitedLabeledLines("Branch", `${branchLabel(repository)}  →  ${repository.upstream ?? "no upstream"}`, width, 2),
-        ...limitedLabeledLines("State", `${worktreeLabel(repository)}; remote ${remoteLabel(repository)}`, width, 2),
+        ...limitedLabeledLines("Branch", compact ? branchLabel(repository) : `${branchLabel(repository)}  →  ${repository.upstream ?? "no upstream"}`, width, compact ? 1 : 2),
+        ...limitedLabeledLines("State", `${worktreeLabel(repository)}; remote ${remoteLabel(repository)}`, width, compact ? 1 : 2),
         ...limitedLabeledLines("Action", actionLabel(repository), width, 2),
     ];
     if (firstChange) {
@@ -552,11 +552,7 @@ export const renderTui = (model, terminal = {}) => {
             if (showDetails) {
                 const compactDetails = detailHeight < DETAIL_ROWS;
                 const detailTitle = compactDetails ? `selected / ${selected.name} ${stateLabel(selected)}` : "selected / repository";
-                const detailContent = repositoryDetailLines(selected, width - 4).slice(compactDetails ? 1 : 0);
-                if (compactDetails && (selected.dirty || selected.conflicts > 0)) {
-                    const filesIndex = detailContent.findIndex((line) => line.startsWith("Files "));
-                    if (filesIndex >= 0) detailContent.splice(filesIndex, 1);
-                }
+                const detailContent = repositoryDetailLines(selected, width - 4, { compact: compactDetails }).slice(compactDetails ? 1 : 0);
                 lines.push(...panel(detailTitle, detailContent, width, detailHeight, terminal, 34));
             }
         }
