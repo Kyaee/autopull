@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -130,8 +130,18 @@ test("fast-forwards a clean repository from its upstream", async () => {
     await git(seed, "add", "README.md");
     await git(seed, "commit", "-m", "remote update");
     await git(seed, "push");
-    const refresh = await fetchRepository(consumer);
-    assert.equal(refresh.ok, true);
+    for (const command of ["fetch", "refresh"]) {
+        let stdout = "";
+        const exitCode = await runCli([command, consumer, "--json"], {
+            stdout: { write: (value) => { stdout += value; } },
+        });
+        assert.equal(exitCode, 0);
+        const document = JSON.parse(stdout);
+        assert.equal(document.command, command);
+        assert.equal(document.refreshResults[0].ok, true);
+        assert.equal(document.repositories[0].behind, 1);
+        assert.equal(await readFile(join(consumer, "README.md"), "utf8"), "initial\n");
+    }
 
     const before = await inspectRepository(consumer);
     assert.equal(before.behind, 1);

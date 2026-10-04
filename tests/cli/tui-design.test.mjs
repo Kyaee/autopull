@@ -54,6 +54,36 @@ test("uses a full-row selection treatment and semantic state colors", () => {
     assert.match(output, /\u001b\[1;7m› selected/);
     assert.match(output, /\u001b\[33mDIRTY 2\u001b\[0m/);
     assert.match(output, /\u001b\[1;31mERROR\u001b\[0m/);
+    assert.match(output, /\u001b\[33mdirty\u001b\[39m/);
+    assert.match(output, /\u001b\[31mbroken\u001b\[39m/);
+});
+
+test("colors repository names by severity across layouts and preserves selection without colors", () => {
+    const repositories = [
+        repository("ERROR", "current"),
+        repository("broken", "error"),
+        repository("conflicted", "conflict", { conflicts: 1 }),
+        ...["dirty", "behind", "ahead", "diverged", "detached", "no-upstream"].map((state) => repository(state, state)),
+    ];
+    for (const columns of [60, 100, 140]) {
+        const state = model(repositories);
+        const output = renderTui(state, { columns, rows: 32, color: true });
+        assert.doesNotMatch(output, /\u001b\[31mERROR\u001b/);
+        for (const repo of repositories.slice(1)) {
+            const code = ["error", "conflict"].includes(repo.state) ? 31 : 33;
+            assert.ok(output.includes(`\u001b[${code}m${repo.name}\u001b[39m`), `${columns}: ${repo.name}`);
+        }
+        for (const selectedIndex of [1, 3]) {
+            state.selectedIndex = selectedIndex;
+            const colored = renderTui(state, { columns, rows: 32, color: true });
+            const code = selectedIndex === 1 ? 31 : 33;
+            assert.ok(colored.includes(`\u001b[27;${code};100m${repositories[selectedIndex].name}\u001b[39;49;7m`));
+            assert.ok(plain(colored).split("\n").every((line) => line.length === columns));
+            const monochrome = renderTui(state, { columns, rows: 32, style: true, color: false });
+            assert.match(monochrome, /\u001b\[1;7m›/);
+            assert.doesNotMatch(monochrome, /\u001b\[(?:31|33|27;31;100|27;33;100)m/);
+        }
+    }
 });
 
 test("keeps selection styling when terminal colors are disabled", () => {

@@ -49,7 +49,7 @@ test("wraps the selected repository blocker instead of truncating it", () => {
     assert.match(output, /\n│\s+branch has no upstream/);
     assert.match(output, /Files\s+src\/a-long-directory\/changed-file\.ts/);
     assert.match(output, /SCOPE\s+All repositories/);
-    assert.match(output, /↑↓\/jk move/);
+    assert.match(output, /↑↓ jk move/);
     assert.equal(output.split("\n").length, 24);
     assert.ok(output.split("\n").every((line) => line.length === 60));
 });

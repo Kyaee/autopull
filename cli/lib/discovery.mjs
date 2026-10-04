@@ -1,6 +1,7 @@
 import { access, readdir, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
+import { isDirectoryExcluded } from "./exclusions.mjs";
 
 const DEFAULT_IGNORES = new Set([
     ".cache",
@@ -66,6 +67,7 @@ export const discoverRepositories = async (roots, options = {}) => {
 
         if (seen.has(canonicalPath)) return {};
         seen.add(canonicalPath);
+        if (isDirectoryExcluded(canonicalPath, options.excludedDirectories ?? [])) return {};
 
         if (await isGitRepository(canonicalPath)) {
             return { repository: canonicalPath };

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, relative } from "node:path";
 import { test } from "node:test";
 import { renderTui, runTui, tuiActionForKey } from "../../cli/lib/tui.mjs";
 
@@ -52,7 +55,8 @@ test("renders repository state, selected details, and TUI controls", () => {
     assert.match(output, /› example/);
     assert.match(output, /Branch  main  →  origin\/main/);
     assert.match(output, /Ready to fast-forward\. Press p to pull/);
-    assert.match(output, /r refresh/);
+    assert.match(output, /f fetch/);
+    assert.match(output, /o root/);
 });
 
 test("explains why a selected repository cannot be pulled", () => {
@@ -74,13 +78,17 @@ test("explains why a selected repository cannot be pulled", () => {
 
 test("maps navigation and action keys", () => {
     assert.equal(tuiActionForKey({ name: "up" }), "up");
-    assert.equal(tuiActionForKey({ name: "j" }), "down");
-    assert.equal(tuiActionForKey({ name: "r" }), "refresh");
+    assert.equal(tuiActionForKey({ name: "j" }), "up");
+    assert.equal(tuiActionForKey({ name: "k" }), "down");
+    assert.equal(tuiActionForKey({ name: "r" }), "fetch");
+    assert.equal(tuiActionForKey({ name: "f" }), "fetch");
+    assert.equal(tuiActionForKey({ name: "o" }), "root");
     assert.equal(tuiActionForKey({ name: "return" }), "enter");
     assert.equal(tuiActionForKey({ name: "g" }), "groups");
     assert.equal(tuiActionForKey({ name: "space" }), "toggle");
     assert.equal(tuiActionForKey({ name: "c", ctrl: true }), "quit");
-    assert.equal(tuiActionForKey({ name: "x" }), null);
+    assert.equal(tuiActionForKey({ name: "x" }), "fix");
+    assert.equal(tuiActionForKey({ name: "z" }), null);
 });
 
 test("renders group management and membership views", () => {
@@ -111,7 +119,7 @@ test("keeps the current branch visible in a narrow terminal", () => {
 });
 
 for (const outcome of ["success", "failure", "quit"]) {
-    test(`animates a pending refresh and stops on ${outcome}`, async (t) => {
+    test(`animates a pending fetch and stops on ${outcome}`, async (t) => {
         t.mock.timers.enable({ apis: ["setTimeout"] });
         const input = Object.assign(new EventEmitter(), {
             isTTY: true,
@@ -139,10 +147,10 @@ for (const outcome of ["success", "failure", "quit"]) {
         await settle();
         input.emit("keypress", "r", { name: "r" });
         await settle();
-        assert.match(frames.at(-1), /⠋ Refreshing remotes…/);
-        assert.match(frames.at(-1), /› example/);
+        assert.match(frames.at(-1), /⠋ Fetching remotes…/);
+        assert.match(frames.at(-1), /›.*example/);
         t.mock.timers.tick(100);
-        assert.match(frames.at(-1), /⠙ Refreshing remotes…/);
+        assert.match(frames.at(-1), /⠙ Fetching remotes…/);
         input.emit("keypress", "r", { name: "r" });
         assert.equal(refreshCalls, 1);
 
@@ -154,8 +162,8 @@ for (const outcome of ["success", "failure", "quit"]) {
         else pending.resolve([{ ok: true, repository: repository() }]);
         await settle();
         if (outcome !== "quit") {
-            assert.match(frames.at(-1), outcome === "success" ? /Remote state refreshed\./ : /Failed: Fetch unavailable/);
-            assert.doesNotMatch(frames.at(-1), /Refreshing remotes…/);
+            assert.match(frames.at(-1), outcome === "success" ? /Remote state fetched\./ : /Failed: Fetch unavailable/);
+            assert.doesNotMatch(frames.at(-1), /Fetching remotes…/);
         }
         const count = frames.length;
         t.mock.timers.tick(500);
@@ -164,3 +172,87 @@ for (const outcome of ["success", "failure", "quit"]) {
         await running;
     });
 }
+
+test("changes roots, clears the group filter, and uses the new root for subsequent scans and fetches", async (t) => {
+    const build = join(process.cwd(), "build");
+    await mkdir(build, { recursive: true });
+    const root = await mkdtemp(join(build, "root tests-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const input = Object.assign(new EventEmitter(), { isTTY: true, setRawMode() {}, resume() {} });
+    const frames = [];
+    const output = Object.assign(new EventEmitter(), {
+        isTTY: true, columns: 120, rows: 30,
+        write(frame) { frames.push(frame); },
+    });
+    const discoveredRoots = [];
+    const fetchedPaths = [];
+    const initialRoots = ["/work"];
+    const running = runTui({ roots: initialRoots, color: false }, { stdin: input, stdout: output }, {
+        discoverRepositories: async (roots) => {
+            discoveredRoots.push([...roots]);
+            return { repositories: [join(roots[0], "example")], errors: [] };
+        },
+        inspectMany: async (paths) => [repository({ path: paths[0] })],
+        loadGroups: async () => [{ name: "Work", repositories: ["/work/example"] }],
+        refreshMany: async (paths) => {
+            fetchedPaths.push([...paths]);
+            return [{ ok: true, repository: repository({ path: paths[0] }) }];
+        },
+    });
+    const key = (name, text = "") => input.emit("keypress", text, { name });
+    t.after(() => key("q"));
+    const settle = () => new Promise((resolve) => setImmediate(resolve));
+    const waitForScan = async (count) => {
+        for (let attempts = 0; attempts < 100; attempts += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            if (discoveredRoots.length === count && /STATUS  Scanned/.test(frames.at(-1))) return;
+        }
+        assert.fail("Root scan did not complete.");
+    };
+    await waitForScan(1);
+    key("o");
+    assert.match(frames.at(-1), /root folder/);
+    key("escape");
+    assert.equal(discoveredRoots.length, 1);
+
+    for (const invalid of ["", join(root, "missing"), join(process.cwd(), "README.md")]) {
+        key("o");
+        if (invalid) key(undefined, invalid);
+        key("return");
+        for (let attempts = 0; attempts < 100 && !/Failed:/.test(frames.at(-1)); attempts += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.match(frames.at(-1), /Failed: Root folder/);
+        assert.match(frames.at(-1), /›.*example/);
+        assert.equal(discoveredRoots.length, 1);
+    }
+
+    key("g");
+    key("down");
+    key("r");
+    assert.match(frames.at(-1), /Rename Work/);
+    key("escape");
+    key("return");
+    assert.match(frames.at(-1), /repositories \/ Work/);
+    key("o");
+    key(undefined, `~/${relative(homedir(), root)}`);
+    key("return");
+    await waitForScan(2);
+    assert.deepEqual(discoveredRoots.at(-1), [root]);
+    assert.match(frames.at(-1), /repositories \/ All repositories/);
+    assert.deepEqual(initialRoots, ["/work"]);
+    key("s");
+    await waitForScan(3);
+    assert.deepEqual(discoveredRoots.at(-1), [root]);
+    key("f");
+    await settle();
+    assert.deepEqual(fetchedPaths, [[join(root, "example")]]);
+
+    key("o");
+    key(undefined, relative(process.cwd(), root));
+    key("return");
+    await waitForScan(5);
+    assert.deepEqual(discoveredRoots.at(-1), [root]);
+    key("q");
+    await running;
+});

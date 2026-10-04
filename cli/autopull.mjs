@@ -9,6 +9,7 @@ import { formatPull, formatScan } from "./lib/format.mjs";
 import { inspectRepository, pullRepository } from "./lib/git.mjs";
 import { envelope, inspectMany, refreshMany, summarize } from "./lib/protocol.mjs";
 import { runTui } from "./lib/tui.mjs";
+import { loadExclusions } from "./lib/exclusions.mjs";
 
 const HELP = `Autopull safely inspects and updates local Git repositories.
 
@@ -16,18 +17,19 @@ Usage:
   autopull
   autopull tui [roots...] [--max-depth N]
   autopull scan [roots...] [--json] [--max-depth N]
-  autopull refresh [roots...] [--json] [--max-depth N]
+  autopull fetch [roots...] [--json] [--max-depth N]
   autopull status <repository> [--json]
   autopull pull <repository> [--json]
 
 Commands:
   tui      Open the interactive terminal dashboard (the default)
   scan     Discover repositories and inspect their local Git state
-  refresh  Fetch and then inspect repositories without changing working trees
+  fetch    Fetch and then inspect repositories without changing working trees
   status   Inspect one repository
   pull     Pull one clean repository using --ff-only
 
-Scan is read-only. Use refresh when remote counts must be current.`;
+Scan is read-only. Use fetch when remote counts must be current.
+The refresh command remains available as an alias for fetch.`;
 
 const parsedArguments = (argv) => {
     const values = [];
@@ -71,7 +73,8 @@ const write = (io, document, text, json) => {
 
 const scan = async (args, io) => {
     const roots = args.values.length > 0 ? args.values.map((root) => resolve(root)) : defaultRoots();
-    const discovery = await discoverRepositories(roots, { maxDepth: args.maxDepth });
+    const excludedDirectories = await loadExclusions();
+    const discovery = await discoverRepositories(roots, { maxDepth: args.maxDepth, excludedDirectories });
     const repositories = await inspectMany(discovery.repositories);
     const document = envelope("scan", {
         roots,
@@ -83,12 +86,13 @@ const scan = async (args, io) => {
     return 0;
 };
 
-const refresh = async (args, io) => {
+const fetch = async (args, io, command) => {
     const roots = args.values.length > 0 ? args.values.map((root) => resolve(root)) : defaultRoots();
-    const discovery = await discoverRepositories(roots, { maxDepth: args.maxDepth });
+    const excludedDirectories = await loadExclusions();
+    const discovery = await discoverRepositories(roots, { maxDepth: args.maxDepth, excludedDirectories });
     const refreshResults = await refreshMany(discovery.repositories);
     const repositories = refreshResults.map((result) => result.repository);
-    const document = envelope("refresh", {
+    const document = envelope(command, {
         roots,
         summary: summarize(repositories),
         repositories,
@@ -139,7 +143,7 @@ export const runCli = async (arguments_, io = process) => {
         return runTui({ roots, maxDepth: args.maxDepth }, io);
     }
     if (command === "scan") return scan(args, io);
-    if (command === "refresh") return refresh(args, io);
+    if (command === "fetch" || command === "refresh") return fetch(args, io, command);
     if (command === "status") return status(args, io);
     if (command === "pull") return pull(args, io);
     throw new Error(`Unknown command: ${command}`);

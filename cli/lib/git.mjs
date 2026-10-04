@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { basename, resolve } from "node:path";
 import { promisify } from "node:util";
+import { canonicalDirectory, isDirectoryExcluded, loadExclusions } from "./exclusions.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -153,8 +154,17 @@ export const inspectRepository = async (repositoryPath) => {
     return classifyRepository(parsePorcelainV2(stdout, repositoryPath));
 };
 
-export const pullRepository = async (repositoryPath) => {
+export const pullRepository = async (repositoryPath, options = {}) => {
+    const excludedDirectories = await loadExclusions(options.exclusionsPath);
     const before = await inspectRepository(repositoryPath);
+
+    if (isDirectoryExcluded(await canonicalDirectory(repositoryPath), excludedDirectories)) {
+        return {
+            ok: false, blocked: true,
+            message: "Update blocked: this directory is hidden from Autopull. Restore it from the hidden directories list first.",
+            repository: before,
+        };
+    }
 
     if (!before.canPull) {
         return {
@@ -194,7 +204,7 @@ export const fetchRepository = async (repositoryPath) => {
     if (!before.upstream) {
         return {
             ok: false,
-            message: "Refresh skipped: the current branch has no upstream.",
+            message: "Fetch skipped: the current branch has no upstream.",
             repository: before,
         };
     }
@@ -205,7 +215,7 @@ export const fetchRepository = async (repositoryPath) => {
         });
         return {
             ok: true,
-            message: (stdout || stderr).trim() || "Remote state refreshed.",
+            message: (stdout || stderr).trim() || "Remote state fetched.",
             repository: await inspectRepository(repositoryPath),
         };
     } catch (error) {
